@@ -2,18 +2,16 @@
 # MAGIC %md
 # MAGIC # AI-Powered PII Discovery → Human Review → Tag → Auto-Mask
 # MAGIC
-# MAGIC A **LogSentinel-inspired** flow for keeping the PII target list current as the JSON evolves:
+# MAGIC An **AI-assisted** flow for keeping the PII target list current as the JSON evolves:
 # MAGIC
 # MAGIC ```
 # MAGIC  ai_query classify  →  confidence score  →  HUMAN REVIEW GATE  →  apply governed tag  →  ABAC auto-masks
 # MAGIC ```
 # MAGIC
-# MAGIC This mirrors how Databricks' internal **LogSentinel** works: an LLM proposes PII labels with a
-# MAGIC confidence score, findings are **reviewed by a human before enforcement** (LogSentinel files JIRA
-# MAGIC tickets; here we use an approval table), and only *approved* labels drive governance. Once a column
-# MAGIC is tagged, the **schema-level ABAC policy** from `pii_masking_json_demo` masks it automatically — no
-# MAGIC per-table change. See the blog: *LogSentinel: How Databricks uses Databricks — LLM-powered PII
-# MAGIC detection and governance*.
+# MAGIC An LLM proposes PII labels with a confidence score, findings are **reviewed by a human before
+# MAGIC enforcement** (here, via an approval table), and only *approved* labels drive governance. Once a
+# MAGIC column is tagged, the **schema-level ABAC policy** from `pii_masking_json_demo` masks it
+# MAGIC automatically — no per-table change.
 # MAGIC
 # MAGIC > Treat AI output as a **starting point**. Nothing is enforced until a human approves it.
 
@@ -43,8 +41,8 @@ fqtn    = f"{catalog}.{schema}.{table}"
 # MAGIC %md
 # MAGIC ## 1. Classify — ask the LLM to enumerate PII-bearing JSON paths (confidence 0–100)
 # MAGIC For each leaf field we get `json_path`, `key`, `classification`, `reasoning`, and a **confidence
-# MAGIC score 0–100** (LogSentinel uses a Mixture-of-Experts: multiple models vote and the highest-confidence
-# MAGIC label wins — you can approximate that by running several `model` endpoints and taking the max).
+# MAGIC score 0–100**. For higher confidence you can run several `model` endpoints and take the
+# MAGIC highest-confidence label (an ensemble/voting approach).
 
 # COMMAND ----------
 
@@ -123,7 +121,7 @@ else:
 # MAGIC %md
 # MAGIC ## 3. HUMAN REVIEW GATE (required before enforcement)
 # MAGIC Nothing is enforced from AI output alone. A reviewer inspects `pii_path_proposals` and sets
-# MAGIC `approved = true/false` per row (this is the analog of LogSentinel's JIRA-ticket triage). Below-
+# MAGIC `approved = true/false` per row (a lightweight approval/triage step). Below-
 # MAGIC threshold proposals default to `approved = false` and must be explicitly opted in.
 # MAGIC
 # MAGIC ```sql

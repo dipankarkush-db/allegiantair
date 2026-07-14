@@ -68,11 +68,14 @@ Example config (`config/pii_policies.json`):
 
 | Path | Purpose |
 |---|---|
-| **`notebooks/pii_masking_json_demo.ipynb`** | **Start here.** Self-contained, idempotent notebook — saved **with the outputs from a full run**. Builds the demo table, mask functions, governed tag, and ABAC policies, then validates. |
-| `notebooks/02_pii_path_discovery.py` | *Optional* AI-assisted discovery: `ai_query` classifies which JSON paths hold PII (confidence score → human review → tag → ABAC auto-masks). A discovery aid, not enforcement. |
-| `sql/01_json_pii_masking.sql` | SQL-only reference of the same objects. |
-| `config/pii_policies.json` | The single config file (`PII type → config`). The notebook loads its default from here. |
+| **`notebooks/pii_masking_json_demo.ipynb`** | **The masking solution — start here.** Self-contained, idempotent notebook, saved **with the outputs from a full run**. Builds the demo table, native SQL mask functions, governed tag, and ABAC policies, then validates that PII is masked and all non-PII is preserved. |
+| `notebooks/pii_path_discovery.py` | **A separate, optional AI aid for _finding_ PII.** Uses `ai_query` to classify which JSON paths hold PII (confidence score → human review → tag → ABAC auto-masks). It helps you *populate the config*; it does **not** do the masking. |
+| `sql/01_json_pii_masking.sql` | SQL-only reference of the same masking objects (mask functions + ABAC policies), for teams who prefer plain SQL over the notebook. |
+| `config/pii_policies.json` | The single config file (`PII type → config`) that defines **what** is PII. The masking notebook loads its default from here. |
 | `sample/` | Allegiant Air's GA sample and a URL-embedded example, each with its masked output. |
+
+> The two notebooks serve **different, independent purposes** — `pii_masking_json_demo` *masks* PII;
+> `pii_path_discovery` *finds* candidate PII paths. Run either on its own; there is **no required order**.
 
 ## Run it in Databricks
 

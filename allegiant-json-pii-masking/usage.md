@@ -62,4 +62,3 @@ the demo table + data, the governed tag, and the ABAC policies. The only thing i
 - **Retarget:** edit an entry in `pii_policies` and re-run — the mask function and policy are recreated.
 - **Permanent removal (CCPA):** materialize a masked copy once with the mask functions so the raw bytes are
   gone (also the fastest to read).
-- **No ABAC in your environment:** use the per-table fallback (`ALTER TABLE … SET MASK mask_pii_<type>`).

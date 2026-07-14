@@ -113,18 +113,6 @@ ON COLUMN c;
 -- COMMAND ----------
 
 -- MAGIC %md
--- MAGIC ## 4-alt. MODE 1 (legacy) — per-table column mask (no ABAC)
--- MAGIC If ABAC/governed tags are unavailable, apply the same native fn per table (repeat per table/column):
-
--- COMMAND ----------
-
--- ALTER TABLE ${catalog_name}.${schema_name}.${table_name} ALTER COLUMN hit_payload  SET MASK ${catalog_name}.${schema_name}.mask_pii_name;
--- ALTER TABLE ${catalog_name}.${schema_name}.${table_name} ALTER COLUMN user_payload SET MASK ${catalog_name}.${schema_name}.mask_pii_email;
--- ALTER TABLE ${catalog_name}.${schema_name}.${table_name} ALTER COLUMN hit_payload  DROP MASK;
-
--- COMMAND ----------
-
--- MAGIC %md
 -- MAGIC ## 5. MODE 2 (fastest for "everyone masked") — materialize once
 -- MAGIC Nobody sees raw, so skip per-query masking: rewrite once with the native fns and read plain columns.
 -- MAGIC (Also the CCPA "permanent removal" path — the raw values are gone from the stored copy.)

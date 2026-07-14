@@ -1,0 +1,16 @@
+{
+  "name": {
+    "strategy": "REDACT",
+    "keys": ["name"],
+    "paths": [],
+    "url_params": ["firstName", "lastName", "fname", "lname", "first_name", "last_name", "email"],
+    "regex": []
+  },
+  "email": {
+    "strategy": "REDACT",
+    "keys": ["email"],
+    "paths": [],
+    "url_params": [],
+    "regex": []
+  }
+}

@@ -34,6 +34,40 @@ Realistic patterns for GA-style event blobs — designed to expose *when* maskin
 | `extract_pii` | extract a field that **is** masked | shows masking actually working (`***MASKED***`) |
 | `no_masked_col` | touches only `hit_id` (no masked column) | proves **dynamic ABAC adds ~0 overhead when the masked column isn't read** |
 
+## Example results & findings
+
+Best-of-5 samples on a serverless SQL warehouse (`execution_duration_ms`, result cache off). Your numbers
+will differ with warehouse size — treat these as directional.
+
+**At 100M rows:**
+
+| Query pattern | Baseline | Dynamic (ABAC) | Materialized |
+|---|--:|--:|--:|
+| `no_masked_col` (masked column not read) | 12 ms | **12 ms (~0%)** | 12 ms |
+| `point_lookup` (one row) | 66 ms | **66 ms (~0%)** | 76 ms |
+| `extract_pii` (read a masked field, 1k rows) | 60 ms | 81 ms (+35%) | 60 ms |
+| `groupby_nonpii` (GROUP BY over masked col) | 436 ms | 1,085 ms (+149%) | 463 ms |
+| `filter_nonpii` (filter on field in masked col) | 602 ms | 3,637 ms (+504%) | 735 ms |
+| `full_scan_mask` (scan **both** PII columns) | 416 ms | **4,024 ms (+867%)** | 390 ms |
+
+**What it shows:**
+1. **Dynamic ABAC masking is effectively free when a query doesn't read a masked column** — `no_masked_col`
+   and `point_lookup` show ~0% overhead at every scale. UC only applies the mask to columns actually projected.
+2. **When a query scans/reads the masked JSON columns, dynamic masking adds real latency** — the
+   `regexp_replace` runs on every row. A full scan of both PII columns was ~10× baseline at 100M.
+3. **Materializing a pre-masked copy removes the read-time cost** — `materialized` ≈ baseline (and it's the
+   CCPA permanent-removal path).
+4. **Overhead is per-row CPU**, so wall-clock scales with *rows masked* and *inversely with warehouse
+   parallelism* — a bigger/faster warehouse cuts it. (This is why a small 1M table, with few files and low
+   parallelism, can show *higher* wall-clock than 10M; read each scale on its own, not as a cross-scale trend.)
+
+**Takeaway for Allegiant:** for BI/analytics that repeatedly scan the masked columns at volume, prefer the
+**materialized** path; use **dynamic ABAC** where some users need raw access and masked scans are occasional
+or don't touch the masked column. Either way, tag the columns and the ABAC policy does the rest.
+
+**Live dashboard:** `Allegiant PII Masking — Performance & Overhead` (in this folder in the workspace) —
+or import `perf_dashboard.lvdash.json`.
+
 ## How to run
 
 1. **`01_setup_and_generate.sql`** — Run All. Builds the perf schema, native SQL mask functions, ABAC

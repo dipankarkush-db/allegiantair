@@ -62,6 +62,15 @@ blank the column for all subjects — erase the one subject, everywhere, and rem
   reads the tags from `information_schema.column_tags` and **auto-seeds the registry**, enriching each with
   the match/erase metadata a tag can't hold (identifier role, is-identifier, strategy) plus the table's
   `subject_scope`. Tag a new column → it's in scope; no code change.
+- **Native Data Classification is a second, automatic tag source.** If UC
+  [Data Classification](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification)
+  is enabled on the catalog, its agentic scanner auto-applies system `class.*` tags (`class.email_address`,
+  `class.name`, `class.phone_number`, …) within ~24h of a table being created. `01` reads those too and maps
+  them to our vocabulary, so the registry **auto-discovers** PII with no manual tagging. The manual `pii=`
+  tag **wins on conflict** (lets you override the scanner and declare JSON-payload/`pnr` columns a
+  column-level scan can't). Classifier-found types other than email/name are **erased but not used as match
+  keys** — email stays the match primary, name the fallback; auto-discovery widens *what* is erased, not
+  *who* is matched.
 - **OneTrust REST intake** (`06_intake_onetrust`) pulls open privacy requests and **upserts** them into
   `dsar_request` (idempotent `MERGE`), replacing the seeded demo requests in production. Ships with a
   `use_mock` mode so the full path runs before Allegiant's OneTrust creds are wired.

@@ -77,6 +77,33 @@ blank the column for all subjects — erase the one subject, everywhere, and rem
 - **Idempotent** — `00` rebuilds its demo schema cleanly on every run; `06`'s `MERGE` never duplicates or
   resets a `COMPLETE` request.
 
+## Cross-catalog coverage
+
+Kartik's requirement is that the job "look at all tables across all schemas and all catalogs" — tag-driven,
+not a fixed single schema. `05_run_erasure_job` handles this by looping the same engine (load config →
+erase → purge → validate → report) over a **list of `catalog.schema` targets** supplied by the `targets`
+widget (comma- or newline-separated, e.g. `cat1.schema_a, cat1.schema_b, cat2.schema_c`). Blank `targets`
+falls back to the single `catalog`+`schema` widgets, so an existing one-schema run is unchanged.
+
+It is deliberately a **loop per schema**, not one giant cross-catalog scan:
+
+- **Smaller blast radius.** Each target's erase/purge/validate is self-contained. A missing or empty
+  registry, or an out-of-scope-only schema, is logged and skipped gracefully — one bad schema never crashes
+  the whole run or half-erases another.
+- **Per-schema audit trail for compliance.** The registry is per-schema (seeded by `01`), and scope
+  (`customer`/`employee`) is a per-table tag, so the natural unit of evidence is the schema. The report
+  prints a per-(target, request, table) audit **and** a rolled-up per-target summary; the combined
+  validation verdict is `PASS` only if **every** processed target passes.
+- **Still one notebook, one job.** The loop is plain Python inside `05` — no `dbutils.notebook.run()`. The
+  monthly job stays **two tasks**: `06_intake_onetrust` (pull requests) → `05_run_erasure_job`
+  (erase-all-targets).
+
+The `dsar_request` table can live either **per schema** (`request_source=per_schema`, default — each target
+reads and scrubs its own `dsar_request`, matching prior behaviour) or **centrally**
+(`request_source=central` with `request_catalog`/`request_schema` — one master `dsar_request` is read once
+and the same PENDING requests are applied across every target, then scrubbed + completed once after the
+loop).
+
 ## Notebooks (run in order)
 
 | Notebook | What it does |
@@ -86,7 +113,7 @@ blank the column for all subjects — erase the one subject, everywhere, and rem
 | `02_subject_erasure_engine` | Targeted, per-subject erase honouring `request_type` (OBFUSCATE → in-place redact; DELETE → row removal); before/after counts; spot-checks both modes. Supports `dry_run`. |
 | `03_physical_purge` | `REORG` + zero-retention `VACUUM` the affected tables; scrub + complete the request table. |
 | `04_orchestrate_and_validate` | Standalone monthly-job driver (demo lineage): erase (both modes) → purge → **validate no trace remains** → report. Uses the original "all identifiers must match" rule. |
-| **`05_run_erasure_job`** | **Production job — start here for a real run.** Single notebook folding `01`→`04`: reads existing config, **email-primary/name-fallback** match, **employee/customer scope** filter, OBFUSCATE+DELETE, `dry_run` guard, purge, validate, report. No demo scaffolding. |
+| **`05_run_erasure_job`** | **Production job — start here for a real run.** Single notebook folding `01`→`04`: reads existing config, **email-primary/name-fallback** match, **employee/customer scope** filter, OBFUSCATE+DELETE, `dry_run` guard, purge, validate, report. **Loops over a list of `catalog.schema` targets** (cross-catalog/schema), per-target audit + rolled-up validation. No demo scaffolding. |
 | **`06_intake_onetrust`** | **DSAR intake.** Pulls open requests from the **OneTrust** REST API (OAuth2, paginated) and **upserts** them into `dsar_request` (idempotent `MERGE`). `use_mock=true` runs the full path with no live creds. Wire as job task 1, `05` as task 2. |
 
 See **`usage.md`** for step-by-step run instructions, widget reference, and how to onboard your own tables.
@@ -97,7 +124,8 @@ demo lineage). Not both — `04` re-implements 02+03. To re-run, re-run `00` + `
 **Run order (production):** `01` (seed the registry from tags — no demo data) → `06_intake_onetrust` (pull
 real requests into `dsar_request`) → `05_run_erasure_job` (`dry_run=true` to confirm, then `dry_run=false`).
 Schedule `06` then `05` as two tasks of one monthly Job. `05` supersedes `02`/`03`/`04` for real runs — it
-adds the email-primary match rule, the customer/employee scope filter, and the `dry_run` guard.
+adds the email-primary match rule, the customer/employee scope filter, the `dry_run` guard, and the
+cross-catalog/schema target loop (`targets` widget). Seed each target schema's registry with `01` first.
 
 ## Demo tables (created by `00`, in the schema the widgets point at)
 

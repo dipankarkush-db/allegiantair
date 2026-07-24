@@ -63,6 +63,22 @@ hard-coded to any particular workspace.
 **`03`** — `catalog`, `schema`, `redaction_token`, `do_purge` (`false` = REORG only, skip VACUUM).
 **`04`** — `catalog`, `schema`, `redaction_token`, `do_purge`.
 
+**`05_run_erasure_job`** (production, cross-catalog/schema)
+
+| Widget | Meaning |
+|---|---|
+| `catalog` / `schema` | single-target fallback — used only when `targets` is blank |
+| `targets` | list of `catalog.schema` entries to erase, comma- or newline-separated (e.g. `cat1.schema_a, cat1.schema_b, cat2.schema_c`). Blank = run the single `catalog`+`schema` pair |
+| `redaction_token` | value written into PII cells in OBFUSCATE mode (default `***REDACTED***`) |
+| `dry_run` | `true` (default) = count matches only, no writes; `false` = erase + purge |
+| `do_purge` | `false` = REORG only, skip the zero-retention VACUUM |
+| `subject_scope` | `customer` (default) \| `employee` \| `all` — which tables to erase |
+| `request_source` | `per_schema` (default — each target reads/scrubs its own `dsar_request`) \| `central` (one master `dsar_request`, applied to every target) |
+| `request_catalog` / `request_schema` | location of the master `dsar_request` when `request_source=central` (ignored otherwise) |
+
+The `targets`, `subject_scope`, `redaction_token`, `dry_run`, and `do_purge` semantics apply **per target** —
+each schema is loaded, erased, purged, and validated independently, then rolled up into a combined report.
+
 ## Onboarding your own tables
 
 The engine is config-driven — no code change per table:
@@ -81,21 +97,38 @@ The engine is config-driven — no code change per table:
 
 For a real run, skip the demo scaffolding (`00`) and use the two production notebooks:
 
-1. **Seed the registry once from tags** — run `01_pii_column_registry` against your real schema. Tag your
-   PII columns (`pii=<type>`) and, for any employee-only source, tag the **table** with
-   `subject_scope=employee` so it is excluded from customer erasure.
+1. **Seed each target schema's registry from tags** — run `01_pii_column_registry` against every real schema
+   you want in scope. Tag your PII columns (`pii=<type>`) and, for any employee-only source, tag the
+   **table** with `subject_scope=employee` so it is excluded from customer erasure. Each schema ends up with
+   its own `pii_column_registry`.
 2. **`06_intake_onetrust`** — pulls open requests from OneTrust and upserts them into `dsar_request`. Set
    `onetrust_base_url` + a `secret_scope` holding `client_id`/`client_secret`; run with `use_mock=true`
    first to validate the MERGE, then `use_mock=false` once creds are wired.
-3. **`05_run_erasure_job`** — set `subject_scope=customer` (default), run with **`dry_run=true`** and confirm
-   the audit counts, then re-run with **`dry_run=false`** to erase + purge + validate.
+3. **`05_run_erasure_job`** — list every schema in the `targets` widget (comma- or newline-separated
+   `catalog.schema`; leave blank to run the single `catalog`+`schema` pair). Pick `request_source`:
+   `per_schema` (each target reads its own `dsar_request`) or `central` (one master `dsar_request` at
+   `request_catalog.request_schema`, applied to all targets). Set `subject_scope=customer` (default), run
+   with **`dry_run=true`** and confirm the per-target audit counts, then re-run with **`dry_run=false`** to
+   erase + purge + validate every target.
+
+### Cross-catalog coverage
+
+`05` loops the same engine (load config → erase → purge → validate → report) once per `catalog.schema` in
+`targets`. It is a **loop per schema**, not one giant cross-catalog scan, for two reasons: a smaller blast
+radius (a missing/empty registry or an out-of-scope schema is logged and skipped gracefully — one bad schema
+never crashes the run or touches another), and a per-schema audit trail for compliance (the registry is
+per-schema, scope is a per-table tag, so the report groups evidence by schema). The report prints a
+per-(target, request, table) audit plus a rolled-up per-target summary, and the combined verdict is `PASS`
+only if every processed target passes. The loop is plain Python inside the one notebook — no
+`dbutils.notebook.run()` — so the monthly job stays **two tasks**: `06` intake → `05` erase-all-targets.
 
 ### Scheduling the monthly job
 
 Create one Databricks **Job** with two tasks on a **monthly** schedule: task 1 = `06_intake_onetrust`,
-task 2 = `05_run_erasure_job` (depends on task 1, `dry_run=false`). Both read their config from tables, so
-each run needs no edits. `04_orchestrate_and_validate` remains as the demo-lineage single-task alternative,
-but `05` is preferred for production (adds email-primary match, scope filter, and the dry-run guard).
+task 2 = `05_run_erasure_job` (depends on task 1, `dry_run=false`, with `targets` set to all in-scope
+schemas). Both read their config from tables, so each run needs no edits. `04_orchestrate_and_validate`
+remains as the demo-lineage single-task alternative, but `05` is preferred for production (adds
+email-primary match, scope filter, the dry-run guard, and cross-catalog/schema coverage).
 
 ## Notes
 

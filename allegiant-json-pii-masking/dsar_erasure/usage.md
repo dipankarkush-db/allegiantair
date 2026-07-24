@@ -77,12 +77,25 @@ The engine is config-driven — no code change per table:
    column is (or which column is the JSON payload). Plain scalar `email` columns need nothing extra.
 3. Re-run `01` — the registry now includes your table. `02`/`03`/`04` pick it up automatically.
 
-## Scheduling the monthly job
+## Production path (real requests) — `06` + `05`
 
-Create a Databricks **Job** with `04_orchestrate_and_validate` as the task and a **monthly** schedule. It
-reads PENDING requests from `dsar_request` and the config from `pii_column_registry`, so each run needs no
-edits. In production, replace the seeded requests with an intake step that upserts new requests into
-`dsar_request` with `status='PENDING'` (e.g. a REST/Lakeflow pull from your DSAR intake system).
+For a real run, skip the demo scaffolding (`00`) and use the two production notebooks:
+
+1. **Seed the registry once from tags** — run `01_pii_column_registry` against your real schema. Tag your
+   PII columns (`pii=<type>`) and, for any employee-only source, tag the **table** with
+   `subject_scope=employee` so it is excluded from customer erasure.
+2. **`06_intake_onetrust`** — pulls open requests from OneTrust and upserts them into `dsar_request`. Set
+   `onetrust_base_url` + a `secret_scope` holding `client_id`/`client_secret`; run with `use_mock=true`
+   first to validate the MERGE, then `use_mock=false` once creds are wired.
+3. **`05_run_erasure_job`** — set `subject_scope=customer` (default), run with **`dry_run=true`** and confirm
+   the audit counts, then re-run with **`dry_run=false`** to erase + purge + validate.
+
+### Scheduling the monthly job
+
+Create one Databricks **Job** with two tasks on a **monthly** schedule: task 1 = `06_intake_onetrust`,
+task 2 = `05_run_erasure_job` (depends on task 1, `dry_run=false`). Both read their config from tables, so
+each run needs no edits. `04_orchestrate_and_validate` remains as the demo-lineage single-task alternative,
+but `05` is preferred for production (adds email-primary match, scope filter, and the dry-run guard).
 
 ## Notes
 

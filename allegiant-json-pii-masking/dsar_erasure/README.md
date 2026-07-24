@@ -28,7 +28,8 @@ blank the column for all subjects — erase the one subject, everywhere, and rem
    Delta request table) with a **deadline** (`request_date + N days`, configurable) and `status=PENDING`.
    Each request carries a **`request_type`**: `OBFUSCATE` or `DELETE`.
 2. A **`pii_column_registry`** declares which columns are PII across which tables, how to **match** a subject,
-   and how to **erase** each column. It is **auto-seeded from UC column tags** (see below).
+   how to **erase** each column, and each table's **`subject_scope`** (customer/employee). It is
+   **auto-seeded from UC column tags** (see below).
 3. The **erasure engine** builds a dynamic `WHERE` per (request, table) and, honouring `request_type`, either:
    - **OBFUSCATE** → in-place `UPDATE` on the **same table**, erasing only the matched subject's PII cells
      (scalars → redaction token; JSON → targeted `regexp_replace` redaction reusing the masking layer's
@@ -46,15 +47,35 @@ blank the column for all subjects — erase the one subject, everywhere, and rem
 - **Scalar erasure value = fixed redaction token** (default `***REDACTED***`, widget-configurable) in
   OBFUSCATE mode. Physical purge still removes the original raw bytes, so it is CCPA-grade; the token just
   marks the erased cell in the live version. (NULL or a deterministic hash are trivial config swaps.)
-- **Match = all registered identifiers on that table must match** (most conservative). A table with only
-  `email` matches on email; a table with first + last + email requires all three; a single `full_name` column
-  matches the full name string. This handles the "some tables only have an email" case without over-matching.
+- **Match = email-primary, name fallback** (Allegiant's stated rule, applied in `05_run_erasure_job`). If a
+  table exposes an `email` identifier the subject is matched on **email alone** (unique — avoids missing a
+  subject whose name is spelled differently across systems); only tables with **no** email column fall back
+  to **first + last** (or a single `full_name`). For a JSON payload the string must contain the subject's
+  email (primary), falling back to first + last only when the request itself carries no email.
+  > The original demo engine (`02`/`04`) uses the more conservative "**all** registered identifiers must
+  > match". `05` supersedes it with the email-primary rule; both are kept so you can compare.
+- **Employee vs. customer scope.** DSAR/CCPA is a **customer** right, so `05` **skips employee-only tables**
+  (e.g. Merlot crew/internal tables) on a customer request. Scope is a **table-level** UC tag
+  `subject_scope` = `customer` | `employee` (untagged → `customer`); `01` projects it onto the registry and
+  `05` filters on the `subject_scope` widget (`customer` default, or `employee` / `all`).
 - **PII is declared once via UC column tags** (`pii=<type>` — key configurable). `00` tags the columns; `01`
   reads the tags from `information_schema.column_tags` and **auto-seeds the registry**, enriching each with
-  the match/erase metadata a tag can't hold (identifier role, is-identifier, strategy). Tag a new column →
-  it's in scope; no code change.
-- **Native request table now; OneTrust/DSAR REST or Lakeflow intake documented as future** (see notebook `04`).
-- **Idempotent** — `00` rebuilds its demo schema cleanly on every run.
+  the match/erase metadata a tag can't hold (identifier role, is-identifier, strategy) plus the table's
+  `subject_scope`. Tag a new column → it's in scope; no code change.
+- **Native Data Classification is a second, automatic tag source.** If UC
+  [Data Classification](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification)
+  is enabled on the catalog, its agentic scanner auto-applies system `class.*` tags (`class.email_address`,
+  `class.name`, `class.phone_number`, …) within ~24h of a table being created. `01` reads those too and maps
+  them to our vocabulary, so the registry **auto-discovers** PII with no manual tagging. The manual `pii=`
+  tag **wins on conflict** (lets you override the scanner and declare JSON-payload/`pnr` columns a
+  column-level scan can't). Classifier-found types other than email/name are **erased but not used as match
+  keys** — email stays the match primary, name the fallback; auto-discovery widens *what* is erased, not
+  *who* is matched.
+- **OneTrust REST intake** (`06_intake_onetrust`) pulls open privacy requests and **upserts** them into
+  `dsar_request` (idempotent `MERGE`), replacing the seeded demo requests in production. Ships with a
+  `use_mock` mode so the full path runs before Allegiant's OneTrust creds are wired.
+- **Idempotent** — `00` rebuilds its demo schema cleanly on every run; `06`'s `MERGE` never duplicates or
+  resets a `COMPLETE` request.
 
 ## Notebooks (run in order)
 
@@ -64,13 +85,19 @@ blank the column for all subjects — erase the one subject, everywhere, and rem
 | `01_pii_column_registry` | **Auto-seeds `pii_column_registry` from the column tags** + a small role map (the config that drives the engine). |
 | `02_subject_erasure_engine` | Targeted, per-subject erase honouring `request_type` (OBFUSCATE → in-place redact; DELETE → row removal); before/after counts; spot-checks both modes. Supports `dry_run`. |
 | `03_physical_purge` | `REORG` + zero-retention `VACUUM` the affected tables; scrub + complete the request table. |
-| `04_orchestrate_and_validate` | Standalone monthly-job driver: erase (both modes) → purge → **validate no trace remains** → report. Deploy as a scheduled Databricks Job. |
+| `04_orchestrate_and_validate` | Standalone monthly-job driver (demo lineage): erase (both modes) → purge → **validate no trace remains** → report. Uses the original "all identifiers must match" rule. |
+| **`05_run_erasure_job`** | **Production job — start here for a real run.** Single notebook folding `01`→`04`: reads existing config, **email-primary/name-fallback** match, **employee/customer scope** filter, OBFUSCATE+DELETE, `dry_run` guard, purge, validate, report. No demo scaffolding. |
+| **`06_intake_onetrust`** | **DSAR intake.** Pulls open requests from the **OneTrust** REST API (OAuth2, paginated) and **upserts** them into `dsar_request` (idempotent `MERGE`). `use_mock=true` runs the full path with no live creds. Wire as job task 1, `05` as task 2. |
 
 See **`usage.md`** for step-by-step run instructions, widget reference, and how to onboard your own tables.
 
-**Run order:** always `00` → `01` first, then **either** `02` + `03` (step-by-step demo) **or** `04`
-(one-shot production path — it does erase + purge + validation inline). Not both — `04` re-implements 02+03.
-To re-run, re-run `00` + `01` for a fresh PENDING state.
+**Run order (demo):** `00` → `01` first, then **either** `02` + `03` (step-by-step) **or** `04` (one-shot,
+demo lineage). Not both — `04` re-implements 02+03. To re-run, re-run `00` + `01` for a fresh PENDING state.
+
+**Run order (production):** `01` (seed the registry from tags — no demo data) → `06_intake_onetrust` (pull
+real requests into `dsar_request`) → `05_run_erasure_job` (`dry_run=true` to confirm, then `dry_run=false`).
+Schedule `06` then `05` as two tasks of one monthly Job. `05` supersedes `02`/`03`/`04` for real runs — it
+adds the email-primary match rule, the customer/employee scope filter, and the `dry_run` guard.
 
 ## Demo tables (created by `00`, in the schema the widgets point at)
 

@@ -128,6 +128,40 @@ option set from the start, you never need the full refresh.)
 
 ---
 
+## Step 8 — Idempotency: full refresh + repeated incrementals
+
+DSAR erasure must survive any pipeline recompute. Because the erasure removes the
+subject from the **base tables** (raw/bronze/silver), the pipeline is idempotent:
+
+1. After the erasure (Step 5), run an **incremental** update — confirm counts are
+   stable and the subject stays absent.
+2. Run a **full refresh** (`--full-refresh`, or "Full refresh all" in the UI) —
+   this resets every table and re-reads `raw_user` from scratch. The subject is
+   gone from raw, so it cannot reappear; gold recomputes clean.
+3. Run **another incremental** — still stable.
+
+Verify with a per-layer count after each:
+
+```sql
+SELECT 'raw' l, count(*) c, sum(case when user_id='U000000' then 1 else 0 end) subj FROM <cat>.<schema>.raw_user
+UNION ALL SELECT 'bronze', count(*), sum(case when user_id='U000000' then 1 else 0 end) FROM <cat>.<schema>.bronze_user
+UNION ALL SELECT 'silver', count(*), sum(case when user_id='U000000' then 1 else 0 end) FROM <cat>.<schema>.silver_user
+UNION ALL SELECT 'gold',   count(*), sum(case when user_id='U000000' then 1 else 0 end) FROM <cat>.<schema>.gold_user;
+```
+
+✅ Checkpoint: `subj = 0` on every layer, and total counts are identical across all
+three updates. This was verified end-to-end on a live pipeline: incremental →
+full refresh → incremental all converge to the same clean state, and the erased
+`user_id` never returns.
+
+> Note: `gold_user` is a materialized view, so **you cannot `DELETE` from it**
+> (`EXPECT_TABLE_NOT_VIEW`). It is refreshed, not erased — an incremental update is
+> enough for the base tables, and a **full refresh** guarantees gold also drops the
+> subject. Notebook `02` section 5 triggers this refresh (set `PIPELINE_ID` to
+> automate it).
+
+---
+
 ## What this proves to Allegiant
 
 | Question they asked | Answer this demo shows |

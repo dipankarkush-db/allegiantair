@@ -68,6 +68,16 @@ bronze_user ──batch recompute (materialized view)──▶ gold_user
   (the flow that was failing in the incident).
 - **`gold_user`** — **materialized view**: per-customer lifetime rollup
   (lifetime revenue over all bronze events, event count), recomputed each refresh.
+  You cannot `DELETE` from it — erasure removes the subject from the base tables and
+  the MV recomputes clean on refresh.
+
+### Idempotency
+
+Erasure removes the subject from the **base tables**, so the pipeline is idempotent
+under any mix of incremental and full-refresh updates: the erased subject never
+reappears, and repeated updates converge to the same state (subject absent, everyone
+else intact). A full refresh re-reads `raw_user` from scratch — and the subject is
+already gone from raw, so it stays gone. Verified live (see `usage.md` Step 8).
 
 ### Why `user_id` is the match key
 

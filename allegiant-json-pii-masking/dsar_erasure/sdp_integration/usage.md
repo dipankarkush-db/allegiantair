@@ -66,6 +66,53 @@ Note the current update status is **RUNNING** (continuous) or **COMPLETED**
 
 ---
 
+## Step 3b — Running the pipeline: incremental vs full refresh
+
+You run this pipeline two ways. Both are idempotent and safe to repeat.
+
+### Incremental update (the normal run)
+
+Processes **only new/changed commits** since the last checkpoint — new `raw_user`
+appends flow raw → bronze → silver, and the gold MV recomputes. This is what you
+use day-to-day and after an erasure (it's enough to propagate base-table deletes).
+
+- **UI:** open the pipeline → click **Start**.
+- **CLI:**
+  ```bash
+  databricks pipelines start-update <pipeline-id>
+  ```
+
+### Full refresh (reset & rebuild)
+
+**Resets every table** and re-reads `raw_user` from scratch (bronze re-masks all
+rows, silver rebuilds SCD1, gold recomputes). Use it after an erasure to guarantee
+the gold MV drops the subject, or any time you want a clean rebuild.
+
+- **UI:** open the pipeline → **Start ▾** → **Full refresh all** (or select
+  `gold_user` and choose **Full refresh selection** to rebuild just gold).
+- **CLI (all tables):**
+  ```bash
+  databricks pipelines start-update <pipeline-id> --full-refresh
+  ```
+- **CLI (just the gold MV):** via the SDK (what notebook 02 Section 5 does):
+  ```python
+  w.pipelines.start_update(pipeline_id="<id>", full_refresh_selection=["gold_user"])
+  ```
+
+> ⚠️ On a **billion-row** source, a full refresh reprocesses the entire table
+> (hours). For routine erasures prefer an **incremental** update — the erased
+> subject is already gone from the base tables, so incremental keeps it gone
+> without reprocessing everything. Reserve full refresh for when you must force the
+> gold MV to recompute (or on this small demo where it's instant).
+
+### Wait for completion (CLI)
+
+```bash
+databricks pipelines get-update <pipeline-id> <update-id>   # → state: COMPLETED / FAILED / RUNNING
+```
+
+---
+
 ## Step 4 — Dry-run the erasure (notebook 02)
 
 1. Open **`02_zero_downtime_erasure`**.
@@ -88,22 +135,32 @@ data is changed (`dry_run=true`).
 1. In notebook 02, set `dry_run` = **`false`**.
 2. **Run all.**
 3. Watch:
-   - **Section 3** deletes/obfuscates gold → silver → bronze → raw.
-   - **Section 4** physically purges (REORG + VACUUM) every layer.
-   - **Section 5** re-counts all layers → **0** for DELETE, and asserts **no
-     cleartext email survives** → prints `PASS`.
+   - **Section 3** deletes/obfuscates the **base tables** only, top-down
+     silver → bronze → raw. (Gold is a materialized view — it is *not* deleted
+     here; you cannot `DELETE` from a view.)
+   - **Section 4** physically purges (REORG + VACUUM) the base tables that were
+     modified.
+   - **Section 5** refreshes the **gold materialized view** so it re-derives from
+     the now-erased bronze (set `PIPELINE_ID` in that cell to auto-trigger, or
+     refresh from the pipeline UI — see Step 6).
+   - **Section 6** re-counts all layers and asserts **no cleartext email
+     survives** → prints `PASS`. Base tables show **0** immediately; gold shows 0
+     once the refresh in Section 5 / Step 6 completes.
 
-✅ Checkpoint: `PASS — subject erased with no cleartext trace.`
+✅ Checkpoint: `PASS — subject erased from all base tables with no cleartext trace.`
 
 ---
 
-## Step 6 — Prove the pipeline never failed (the whole point)
+## Step 6 — Refresh the gold MV and confirm the pipeline never failed
 
-1. Go back to the pipeline in the UI.
-2. Confirm the latest/continuing update is **still healthy** — no
-   `append-only source` / `FAILED fatally` error. This is the behavior that was
-   impossible before `skipChangeCommits`.
-3. **Liveness probe:** notebook 02 (section 6) appended a fresh raw event
+1. **Refresh gold** so its stored result drops the subject. Either:
+   - set `PIPELINE_ID` in notebook 02 Section 5 (auto-triggers a refresh), or
+   - in the pipeline UI click **Start** (an incremental update recomputes the MV),
+     or run `databricks pipelines start-update <id> --full-refresh`.
+2. Go to the pipeline in the UI and confirm the latest update is **still healthy**
+   — no `append-only source` / `FAILED fatally` error. This is the behavior that
+   was impossible before `skipChangeCommits`.
+3. **Liveness probe:** notebook 02 (Section 7) appended a fresh raw event
    (`U999999`). Trigger the pipeline (or wait for the next micro-batch) and
    confirm it lands in gold:
 
@@ -167,7 +224,7 @@ full refresh → incremental all converge to the same clean state, and the erase
 | Question they asked | Answer this demo shows |
 |---------------------|------------------------|
 | Can we delete PII from all layers incl. bronze? | Yes — DELETE/OBFUSCATE at raw+bronze+silver+gold + VACUUM |
-| Without breaking the append-only stream? | Yes — `skipChangeCommits` on every hop |
+| Without breaking the append-only stream? | Yes — `skipChangeCommits` on the two streaming hops (gold is an MV) |
 | Do we need it on both layers? | Yes — on the two streaming hops (raw→bronze, bronze→silver); gold is a materialized view, so no skipChangeCommits there |
 | Does it add latency? | Negligible — skipping a commit just advances the offset |
 | Do future erasures need a pipeline stop? | No — once `skipChangeCommits` is set, future erasures run live |

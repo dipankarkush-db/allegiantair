@@ -26,8 +26,7 @@ flowchart LR
     %% Node Definitions
     UCV["Unity Catalog Volume (Storage)<br/>/Volumes/cat/schema/raw_user/landing/*.json<br/>(initial & incremental arrivals)"]:::storage
 
-    RawIngest["raw_user (ingest)"]:::raw
-    RawPII["raw_user PII<br/>cleartext"]:::raw
+    Raw["raw_user (ingest)<br/>streaming table<br/>cleartext PII"]:::raw
 
     Bronze["bronze_user<br/>mask PII<br/>scalar + in-JSON"]:::bronze
     Silver["silver_user<br/>clean / validate<br/>(or SCD1)"]:::silver
@@ -36,18 +35,16 @@ flowchart LR
     Erasure["Erasure Job<br/>+ reads PENDING dsar_request<br/>+ DELETE / OBFUSCATE across tables<br/>+ VACUUM (physical purge)<br/>+ rewrite landing FILES in place<br/>+ refresh gold MV<br/>+ validate no cleartext trace"]:::erasure
 
     %% Data Ingestion Flow
-    UCV -->|Auto Loader <br/> cloudFiles, JSON, recursive| RawIngest
-    UCV -->|skipChangeCommits stream| RawPII
-    RawIngest --> RawPII
+    UCV -->|Auto Loader <br/> cloudFiles, JSON, recursive| Raw
 
     %% Processing Pipeline
-    RawPII -->|skipChangeCommits stream| Bronze
+    Raw -->|skipChangeCommits stream| Bronze
     Bronze -->|skipChangeCommits stream| Silver
     Silver -->|batch MV| Gold
 
     %% Erasure Flow & Integrity Loop
     Erasure -.->|CCPA key step: rewrite landing files| UCV
-    Erasure -.->|downstream erase| RawPII
+    Erasure -.->|downstream erase| Raw
     Erasure -.->|downstream erase| Bronze
     Erasure -.->|downstream erase| Silver
     Erasure -.->|downstream erase| Gold

@@ -1,233 +1,143 @@
-# Test runbook — DSAR erasure × SDP (step by step)
+# Test runbook — DSAR erasure × Lakeflow Declarative Pipelines
 
-End-to-end guide to deploy the pipeline, run a DSAR erasure, and prove the
-subject is erased at **every layer** with **zero pipeline downtime**.
+Deploy the pipeline, run it end-to-end (bronze → silver → gold), then process a
+DSAR erasure queue that deletes/masks every named subject at every layer — with
+zero pipeline downtime. Serverless UC workspace assumed. ~20–30 min.
 
-Assumes a serverless-enabled Unity Catalog workspace. Total time ≈ 20–30 min.
+Uses the modern API: `from pyspark import pipelines as dp`.
 
 ---
 
-## Step 1 — Import the folder
-
-Import the three notebooks into your workspace (or use the Git folder that
-already syncs this repo):
+## Step 1 — Import the notebooks
 
 ```
 sdp_integration/
   00_setup_and_landing.ipynb
-  01_sdp_pipeline.ipynb
-  02_zero_downtime_erasure.ipynb
+  01_sdp_pipeline.ipynb                 # clean-silver variant
+  01b_sdp_pipeline_cdc_variant.ipynb    # SCD1-silver variant (optional)
+  02_erasure.ipynb
 ```
 
 ---
 
-## Step 2 — Build the landing source (notebook 00)
+## Step 2 — Build the landing source + DSAR queue (notebook 00)
 
-1. Open **`00_setup_and_landing`**.
-2. Set widgets (defaults are fine):
-   - `catalog` = `dkushari_uc` (or your catalog)
-   - `schema` = `allegiant_air_sdp_dsar`
-   - `num_users` = `2000`, `events_per_user` = `5`
-3. **Run all.** It drops/recreates the schema and builds `raw_user`
-   (~10k rows).
-4. **Copy the demo subject's email** printed in section 3, e.g.
-   `alex.lucero0@example.com`. You'll paste it into notebook 02.
+1. Open **`00_setup_and_landing`**, set `catalog` / `schema` (defaults
+   `dkushari_uc` / `allegiant_air_sdp_dsar`), `num_users`=2000, `events_per_user`=5.
+2. **Run all.** Builds `raw_user` (~10k rows) + a `dsar_request` queue seeded with
+   3 subjects (mix of DELETE / OBFUSCATE).
 
-✅ Checkpoint: `SELECT * FROM <catalog>.<schema>.raw_user LIMIT 5` returns rows
-with cleartext `email`/`full_name` and a `profile_json` blob.
+✅ `SELECT * FROM <cat>.<schema>.raw_user LIMIT 5` shows cleartext PII;
+`SELECT * FROM <cat>.<schema>.dsar_request` shows 3 PENDING requests.
 
 ---
 
 ## Step 3 — Create the Declarative Pipeline (notebook 01)
 
-1. Go to **Jobs & Pipelines → Create → ETL/Declarative pipeline**.
+1. **Jobs & Pipelines → Create → ETL/Declarative pipeline.**
 2. **Source code:** add `01_sdp_pipeline`.
 3. **Compute:** Serverless.
-4. **Destination:** set **default catalog** = your catalog and **target schema**
-   = `allegiant_air_sdp_dsar` (same schema as `raw_user`).
-5. **Configuration** (Settings → Advanced → Configuration), add:
-   | Key | Value |
-   |-----|-------|
-   | `dsar.catalog` | `dkushari_uc` |
-   | `dsar.schema`  | `allegiant_air_sdp_dsar` |
-6. **Start** the pipeline. Let the first update complete.
+4. **Default catalog** = your catalog, **target schema** = `allegiant_air_sdp_dsar`.
+5. **Configuration:** `dsar.catalog` = your catalog, `dsar.schema` =
+   `allegiant_air_sdp_dsar`.
+6. **Start.**
 
-✅ Checkpoint: the pipeline graph shows `bronze_user → silver_user → gold_user`
+✅ Graph shows a clean linear medallion `bronze_user → silver_user → gold_user`,
 all green. Verify:
 
 ```sql
-SELECT * FROM <cat>.<schema>.bronze_user LIMIT 5;   -- email/full_name = ***REDACTED***, user_id intact
-SELECT * FROM <cat>.<schema>.silver_user LIMIT 5;   -- one row per user_id
-SELECT * FROM <cat>.<schema>.gold_user   LIMIT 5;   -- per-customer rollup
+SELECT user_id, email, full_name, revenue FROM <cat>.<schema>.silver_user LIMIT 5;  -- PII redacted, user_id/revenue intact
+SELECT user_id, lifetime_revenue, event_count FROM <cat>.<schema>.gold_user LIMIT 5;  -- per-customer rollup
 ```
 
-Note the current update status is **RUNNING** (continuous) or **COMPLETED**
-(triggered) with **no errors**.
+### (Optional) CDC variant
+
+To demo the SCD1 silver that matches Allegiant's real `dbo_user_silver_cdc`:
+create a **second** pipeline pointing at `01b_sdp_pipeline_cdc_variant`, with
+`dsar.schema` = `allegiant_air_sdp_dsar_cdc` (its own schema). Re-run `00` against
+that schema first. Everything else is identical.
 
 ---
 
 ## Step 3b — Running the pipeline: incremental vs full refresh
 
-You run this pipeline two ways. Both are idempotent and safe to repeat.
+- **Incremental** (normal run): processes only new/changed commits. UI **Start**,
+  or `databricks pipelines start-update <id>`.
+- **Full refresh** (reset & rebuild): resets all tables, re-reads `raw_user` from
+  scratch. UI **Start ▾ → Full refresh all**, or
+  `databricks pipelines start-update <id> --full-refresh`.
+- Wait for completion: `databricks pipelines get-update <id> <update-id>` →
+  `COMPLETED`.
 
-### Incremental update (the normal run)
-
-Processes **only new/changed commits** since the last checkpoint — new `raw_user`
-appends flow raw → bronze → silver, and the gold MV recomputes. This is what you
-use day-to-day and after an erasure (it's enough to propagate base-table deletes).
-
-- **UI:** open the pipeline → click **Start**.
-- **CLI:**
-  ```bash
-  databricks pipelines start-update <pipeline-id>
-  ```
-
-### Full refresh (reset & rebuild)
-
-**Resets every table** and re-reads `raw_user` from scratch (bronze re-masks all
-rows, silver rebuilds SCD1, gold recomputes). Use it after an erasure to guarantee
-the gold MV drops the subject, or any time you want a clean rebuild.
-
-- **UI:** open the pipeline → **Start ▾** → **Full refresh all** (or select
-  `gold_user` and choose **Full refresh selection** to rebuild just gold).
-- **CLI (all tables):**
-  ```bash
-  databricks pipelines start-update <pipeline-id> --full-refresh
-  ```
-- **CLI (just the gold MV):** via the SDK (what notebook 02 Section 5 does):
-  ```python
-  w.pipelines.start_update(pipeline_id="<id>", full_refresh_selection=["gold_user"])
-  ```
-
-> ⚠️ On a **billion-row** source, a full refresh reprocesses the entire table
-> (hours). For routine erasures prefer an **incremental** update — the erased
-> subject is already gone from the base tables, so incremental keeps it gone
-> without reprocessing everything. Reserve full refresh for when you must force the
-> gold MV to recompute (or on this small demo where it's instant).
-
-### Wait for completion (CLI)
-
-```bash
-databricks pipelines get-update <pipeline-id> <update-id>   # → state: COMPLETED / FAILED / RUNNING
-```
+> On a billion-row source prefer **incremental** for routine erasures (the erased
+> subject is already gone from the base tables). Reserve full refresh for forcing
+> the gold MV to recompute or a clean rebuild.
 
 ---
 
 ## Step 4 — Dry-run the erasure (notebook 02)
 
-1. Open **`02_zero_downtime_erasure`**.
-2. Set widgets:
-   - `catalog` / `schema` — match steps 2–3
-   - `subject_email` — the email you copied in step 2
-   - `request_type` = `DELETE` (or `OBFUSCATE`)
-   - `dry_run` = **`true`** (first pass)
-   - `do_purge` = `true`
-3. **Run all.**
+1. Open **`02_erasure`**. Set `catalog` / `schema` to match; `dry_run` = **`true`**;
+   `do_purge` = `true`; `pipeline_id` = your pipeline id (for the gold refresh).
+2. **Run all.**
 
-✅ Checkpoint: sections 1–2 resolve the email to a `user_id` and print non-zero
-match counts at every layer. Section 3 prints the exact SQL it *would* run. No
-data is changed (`dry_run=true`).
+✅ Sections 1–3 list PENDING requests, resolve each email → `user_id`, and pre-count
+matches at every layer. Section 4 prints the exact SQL it *would* run. No changes.
 
 ---
 
 ## Step 5 — Run the live erasure
 
-1. In notebook 02, set `dry_run` = **`false`**.
-2. **Run all.**
-3. Watch:
-   - **Section 3** deletes/obfuscates the **base tables** only, top-down
-     silver → bronze → raw. (Gold is a materialized view — it is *not* deleted
-     here; you cannot `DELETE` from a view.)
-   - **Section 4** physically purges (REORG + VACUUM) the base tables that were
-     modified.
-   - **Section 5** refreshes the **gold materialized view** so it re-derives from
-     the now-erased bronze (set `PIPELINE_ID` in that cell to auto-trigger, or
-     refresh from the pipeline UI — see Step 6).
-   - **Section 6** re-counts all layers and asserts **no cleartext email
-     survives** → prints `PASS`. Base tables show **0** immediately; gold shows 0
-     once the refresh in Section 5 / Step 6 completes.
+1. Set `dry_run` = **`false`**. **Run all.**
+2. What happens:
+   - **Section 4** — per subject, DELETE or OBFUSCATE across `silver → bronze → raw`.
+   - **Section 5** — VACUUM the modified base tables (serverless zero-retention).
+   - **Section 6** — triggers a gold MV refresh (via `pipeline_id`) so gold
+     re-derives from the erased silver.
+   - **Section 7** — validates no cleartext trace, asserts DELETE subjects gone from
+     every base table, marks requests **COMPLETE**.
 
-✅ Checkpoint: `PASS — subject erased from all base tables with no cleartext trace.`
+✅ `PASS — all requested subjects erased from base tables with no cleartext trace.`
+and `dsar_request` all `COMPLETE`.
+
+> If you didn't set `pipeline_id`, refresh gold manually: UI **Start**, or
+> `databricks pipelines start-update <id> --full-refresh`.
 
 ---
 
-## Step 6 — Refresh the gold MV and confirm the pipeline never failed
+## Step 6 — Prove the pipeline never failed
 
-1. **Refresh gold** so its stored result drops the subject. Either:
-   - set `PIPELINE_ID` in notebook 02 Section 5 (auto-triggers a refresh), or
-   - in the pipeline UI click **Start** (an incremental update recomputes the MV),
-     or run `databricks pipelines start-update <id> --full-refresh`.
-2. Go to the pipeline in the UI and confirm the latest update is **still healthy**
-   — no `append-only source` / `FAILED fatally` error. This is the behavior that
-   was impossible before `skipChangeCommits`.
-3. **Liveness probe:** notebook 02 (Section 7) appended a fresh raw event
-   (`U999999`). Trigger the pipeline (or wait for the next micro-batch) and
-   confirm it lands in gold:
+Open the pipeline — the latest update is **healthy**, no `append-only source` /
+`FAILED fatally` error. That behavior was impossible before `skipChangeCommits`.
+
+---
+
+## Step 7 — Idempotency (full refresh + repeated incrementals)
+
+After the erasure, run: **incremental → full refresh → incremental**, checking
+counts each time:
 
 ```sql
-SELECT * FROM <cat>.<schema>.gold_user WHERE user_id = 'U999999';
+SELECT 'raw' l,count(*) c, sum(case when user_id IN (<erased ids>) then 1 else 0 end) subj FROM <cat>.<schema>.raw_user
+UNION ALL SELECT 'bronze',count(*), sum(...) FROM <cat>.<schema>.bronze_user
+UNION ALL SELECT 'silver',count(*), sum(...) FROM <cat>.<schema>.silver_user
+UNION ALL SELECT 'gold',  count(*), sum(...) FROM <cat>.<schema>.gold_user;
 ```
 
-If the probe row appears, the stream is alive **after** the erasure — the
-non-append commit was skipped, not fatal.
-
----
-
-## Step 7 — (Optional) prove the "before" behavior
-
-To demonstrate *why* the hardening matters, temporarily remove
-`skipChangeCommits` from one streaming read in `01_sdp_pipeline`, redeploy, run an
-erasure on that layer, and observe the fatal `append-only source` failure. Then
-restore the option and **full-refresh the affected flow** to recover. (With the
-option set from the start, you never need the full refresh.)
-
-> ⚠️ Only do this in the demo schema — it intentionally breaks the pipeline.
-
----
-
-## Step 8 — Idempotency: full refresh + repeated incrementals
-
-DSAR erasure must survive any pipeline recompute. Because the erasure removes the
-subject from the **base tables** (raw/bronze/silver), the pipeline is idempotent:
-
-1. After the erasure (Step 5), run an **incremental** update — confirm counts are
-   stable and the subject stays absent.
-2. Run a **full refresh** (`--full-refresh`, or "Full refresh all" in the UI) —
-   this resets every table and re-reads `raw_user` from scratch. The subject is
-   gone from raw, so it cannot reappear; gold recomputes clean.
-3. Run **another incremental** — still stable.
-
-Verify with a per-layer count after each:
-
-```sql
-SELECT 'raw' l, count(*) c, sum(case when user_id='U000000' then 1 else 0 end) subj FROM <cat>.<schema>.raw_user
-UNION ALL SELECT 'bronze', count(*), sum(case when user_id='U000000' then 1 else 0 end) FROM <cat>.<schema>.bronze_user
-UNION ALL SELECT 'silver', count(*), sum(case when user_id='U000000' then 1 else 0 end) FROM <cat>.<schema>.silver_user
-UNION ALL SELECT 'gold',   count(*), sum(case when user_id='U000000' then 1 else 0 end) FROM <cat>.<schema>.gold_user;
-```
-
-✅ Checkpoint: `subj = 0` on every layer, and total counts are identical across all
-three updates. This was verified end-to-end on a live pipeline: incremental →
-full refresh → incremental all converge to the same clean state, and the erased
-`user_id` never returns.
-
-> Note: `gold_user` is a materialized view, so **you cannot `DELETE` from it**
-> (`EXPECT_TABLE_NOT_VIEW`). It is refreshed, not erased — an incremental update is
-> enough for the base tables, and a **full refresh** guarantees gold also drops the
-> subject. Notebook `02` section 5 triggers this refresh (set `PIPELINE_ID` to
-> automate it).
+✅ `subj = 0` on every layer, counts identical across all updates. A full refresh
+re-reads `raw_user` (subject already gone), so erased subjects never return.
 
 ---
 
 ## What this proves to Allegiant
 
-| Question they asked | Answer this demo shows |
-|---------------------|------------------------|
-| Can we delete PII from all layers incl. bronze? | Yes — DELETE/OBFUSCATE at raw+bronze+silver+gold + VACUUM |
-| Without breaking the append-only stream? | Yes — `skipChangeCommits` on the two streaming hops (gold is an MV) |
-| Do we need it on both layers? | Yes — on the two streaming hops (raw→bronze, bronze→silver); gold is a materialized view, so no skipChangeCommits there |
+| Question | Answer |
+|----------|--------|
+| Delete PII from all layers incl. bronze? | Yes — DELETE/OBFUSCATE at raw+bronze+silver + VACUUM, gold MV refreshed |
+| Without breaking the append-only stream? | Yes — `skipChangeCommits` on the two streaming hops |
+| Multiple subjects at once? | Yes — `02` processes the whole PENDING `dsar_request` queue |
 | Does it add latency? | Negligible — skipping a commit just advances the offset |
-| Do future erasures need a pipeline stop? | No — once `skipChangeCommits` is set, future erasures run live |
+| Future erasures need a pipeline stop? | No — once `skipChangeCommits` is set, erasures run live |
 
 ---
 
@@ -237,4 +147,4 @@ full refresh → incremental all converge to the same clean state, and the erase
 DROP SCHEMA IF EXISTS <catalog>.<schema> CASCADE;
 ```
 
-Then delete the pipeline from Jobs & Pipelines.
+Then delete the pipeline(s) from Jobs & Pipelines.

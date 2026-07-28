@@ -1,124 +1,105 @@
-# DSAR erasure × Spark Declarative Pipelines (SDP)
+# DSAR erasure × Lakeflow Declarative Pipelines (SDP)
 
-Integrates per-subject DSAR/CCPA erasure with a **streaming** Spark Declarative
-Pipeline so an erasure can delete PII at **every layer (bronze → silver → gold)**
-**without stopping the pipeline and without a full refresh**.
+Integrates per-subject DSAR/CCPA erasure with a **streaming** Lakeflow Declarative
+Pipeline so an erasure deletes/masks a subject's records at **every layer
+(bronze → silver → gold)** **without stopping the pipeline and without a full
+refresh**.
 
-This is a self-contained sub-solution of the [`dsar_erasure/`](../) layer. It
-targets the exact failure Allegiant hit on the Merlot pipeline:
+Self-contained sub-solution of the [`dsar_erasure/`](../) layer. Uses the **modern**
+Lakeflow Declarative Pipelines Python API: `from pyspark import pipelines as dp`
+(`@dp.table`, `@dp.materialized_view`, `dp.create_auto_cdc_flow`). *(Not the legacy
+`import dlt` module.)*
 
-> `Flow ... has FAILED fatally... we detected an update or delete to one or more
-> rows in the source table. Streaming tables may only use append-only streaming
-> sources.`
+## The problem it solves
 
-## The problem in one paragraph
+Allegiant's Merlot ingest is an SDP: `autoloader → obfuscation view → bronze
+STREAMING TABLE → silver (AUTO CDC/SCD1) → gold`. An in-place DSAR erasure
+`UPDATE`/`DELETE` on the append-only bronze streaming source is a **non-append
+commit** → the downstream flow fails fatally:
 
-Allegiant's Merlot ingest is an SDP:
-`autoloader → obfuscation view → bronze STREAMING TABLE → silver (AUTO CDC / SCD1) → gold`.
-Bronze is an **append-only streaming source**. When an in-place DSAR erasure
-`UPDATE`/`DELETE` ran directly on bronze, it created a **non-append commit**. The
-downstream streaming flow had already consumed those files, so it could not
-represent "a file I handed downstream just changed" — it **failed fatally and
-would not auto-restart**. Every retry hit the same commit and died again.
+> *Streaming tables may only use append-only streaming sources... we detected an
+> update or delete to one or more rows in the source table.*
 
 ## The fix
 
-Set **`skipChangeCommits = "true"` on every streaming read** that consumes a
-table an erasure will mutate:
+`.option("skipChangeCommits", "true")` on **every streaming read** that consumes a
+table an erasure mutates. The stream **skips** the erasure's non-append commit
+instead of failing — the row is still gone from the source; the stream just
+doesn't crash. Skipping a commit only advances the offset (no data read) →
+negligible latency.
 
-```python
-spark.readStream.option("skipChangeCommits", "true").table("...")
-```
-
-This tells the stream: *when you meet a commit containing an UPDATE/DELETE, skip
-it instead of failing.* It does **not** undo the delete — the row is still gone
-from the source. The stream just doesn't crash when it notices the source
-changed. Skipping a commit only advances the offset (no data read, no files
-scanned), so the latency cost is negligible.
-
-**Which layers need it** (answering *"we'd need it on both layers, right?"*): yes —
-on the **two append-only streaming hops**, `raw → bronze` and `bronze → silver`.
-The erasure deletes at every layer, so each of those streaming reads meets a
-non-append commit and needs the option.
-
-The aggregating **gold** layer is deliberately **not** a `skipChangeCommits`
-stream — it's a **materialized view** (batch recompute over bronze). A
-`skipChangeCommits` stream over the SCD1 silver would silently drop *legitimate*
-customer updates (SCD1 mutates on every change, not just erasures), and a
-streaming aggregation keeps checkpoint state that could **resurrect an erased
-subject** on restart. An MV fully recomputes from current bronze, so it reflects
-every erasure automatically and holds no state to resurrect. So the rule is:
-**`skipChangeCommits` on the two streams; materialized view for gold.**
-
-## Architecture
+## Clean linear medallion
 
 ```
-raw_user ──stream(skipChangeCommits)──▶ bronze_user ──stream(skipChangeCommits)──▶ silver_user
-  (landing)      obfuscate PII inline        (append-only)      AUTO CDC / SCD1         (dimension)
-
-bronze_user ──batch recompute (materialized view)──▶ gold_user
-                                                     (per-customer lifetime rollup)
+raw_user ──stream──▶ bronze_user ──stream──▶ silver_user ──batch MV──▶ gold_user
+           mask PII            clean/validate           per-customer aggregate
+          (skipChangeCommits)  (skipChangeCommits)      (recomputed each refresh)
 ```
 
-- **`raw_user`** — the landing table (what autoloader writes). Holds cleartext
-  PII **and** a stable non-PII business key `user_id`.
-- **`bronze_user`** — streaming table that reads raw and applies native-SQL PII
-  masking inline (scalar + in-JSON), preserving `user_id`, `revenue`, `event_ts`.
-- **`silver_user`** — SCD type 1 dimension via **AUTO CDC**, keyed on `user_id`
-  (the flow that was failing in the incident).
-- **`gold_user`** — **materialized view**: per-customer lifetime rollup
-  (lifetime revenue over all bronze events, event count), recomputed each refresh.
-  You cannot `DELETE` from it — erasure removes the subject from the base tables and
-  the MV recomputes clean on refresh.
+- **`raw_user`** — landing table (cleartext PII + stable non-PII `user_id`).
+- **`bronze_user`** — streaming; masks PII inline (scalar + in-JSON), preserves
+  `user_id`/`revenue`.
+- **`silver_user`** — streaming; cleaned/validated events (or SCD1 dimension in the
+  CDC variant). Reads **bronze**.
+- **`gold_user`** — **materialized view**; per-customer rollup. Reads **silver**
+  (linear). Batch recompute → reflects erasures on refresh, no checkpoint state to
+  resurrect a subject. You cannot `DELETE` from a view, so erasure deletes the base
+  tables and refreshes this MV.
 
-### Idempotency
-
-Erasure removes the subject from the **base tables**, so the pipeline is idempotent
-under any mix of incremental and full-refresh updates: the erased subject never
-reappears, and repeated updates converge to the same state (subject absent, everyone
-else intact). A full refresh re-reads `raw_user` from scratch — and the subject is
-already gone from raw, so it stays gone. Verified live (see `usage.md` Step 8).
+`skipChangeCommits` is on the two streaming hops (raw→bronze, bronze→silver). Gold
+is an MV, so it needs no skipChangeCommits — it just recomputes.
 
 ### Why `user_id` is the match key
 
-DSAR intake gives an **email**, but bronze/silver/gold have **redacted the
-email**, so you can't match on it downstream. We resolve email → `user_id` once
-from the raw layer, then erase by `user_id` everywhere. `user_id` is a non-PII
-business key, so it survives obfuscation. (This mirrors the base layer's
-"email-first" rule: email is the authoritative intake key; here it resolves to
-the stable join key.)
+Intake gives an **email**, but bronze/silver mask it — so we resolve email →
+`user_id` once from raw, then erase by `user_id` everywhere. `user_id` is non-PII
+and survives masking.
 
 ## Files
 
-| File | What it is | How to run |
-|------|-----------|-----------|
-| `00_setup_and_landing.ipynb` | Builds the isolated demo schema + `raw_user` landing table + surfaces a demo subject | **Batch** — run once, top to bottom |
-| `01_sdp_pipeline.ipynb` | The pipeline definition (bronze/silver/gold, hardened) | **Attach as a Declarative Pipeline source** — do NOT run interactively |
-| `02_zero_downtime_erasure.ipynb` | Erase one subject across all layers + physical purge, while the pipeline streams | **Batch** — run per DSAR request |
-| `usage.md` | Step-by-step test runbook | — |
+| File | What | How to run |
+|------|------|-----------|
+| `00_setup_and_landing.ipynb` | Isolated schema + `raw_user` + multi-subject `dsar_request` queue | **Batch** — run once |
+| `01_sdp_pipeline.ipynb` | Pipeline: bronze → silver (clean) → gold MV | **Attach as a Lakeflow pipeline source** |
+| `01b_sdp_pipeline_cdc_variant.ipynb` | Alt pipeline: silver as **SCD1 via AUTO CDC** (matches real Merlot) | Attach as a *separate* pipeline (own schema) |
+| `02_erasure.ipynb` | Process the DSAR queue: erase **every** subject at **every** layer + purge + refresh gold | **Batch** — run per DSAR batch |
+| `usage.md` | Step-by-step runbook (incremental & full refresh) | — |
 
-## Two erasure modes
+## Two variants of silver
 
-- **DELETE** — remove the subject's rows entirely (right-to-delete).
-- **OBFUSCATE** — keep the row, redact PII cells (opt-out / do-not-sell). Only
-  `raw_user` still holds cleartext PII, so obfuscate redacts there; downstream
-  layers are already redacted.
+- **Clean silver (`01`)** — `silver_user` is a plain streaming table (validated
+  events). Simple linear graph; directly `DELETE`-able.
+- **SCD1 silver (`01b`)** — `silver_user` is a type-1 dimension via
+  `dp.create_auto_cdc_flow` keyed on `user_id`. Faithfully matches Allegiant's real
+  `dbo_user_silver_cdc` flow. Deploy as a separate pipeline with its own target
+  schema (e.g. `allegiant_air_sdp_dsar_cdc`).
 
-## Relationship to the base `dsar_erasure/` layer
+## Two erasure modes (per `dsar_request` row)
 
-This reuses the same building blocks — email-first matching, native `regexp_replace`
-in-JSON masking, DELETE/OBFUSCATE modes, and the serverless VACUUM technique
-(table property `delta.deletedFileRetentionDuration = 'interval 0 hours'` + plain
-`VACUUM`). What's new is the **streaming integration**: the pipeline is hardened
-with `skipChangeCommits` so erasure runs live. The base layer (`00`–`05`) remains
-the engine for non-streaming / cross-catalog erasure; this folder is the pattern
-when the tables are SDP streaming targets.
+- **DELETE** — remove the subject's rows entirely.
+- **OBFUSCATE** — keep rows, redact PII cells (only `raw_user` still holds cleartext
+  PII; downstream already masked).
+
+`02_erasure` processes **all PENDING requests** in one run — every named subject,
+every layer — exactly like the base `dsar_erasure/` engine.
+
+## Idempotency
+
+Erasure removes subjects from the **base tables**, so the pipeline is idempotent
+under any mix of incremental and full-refresh updates: a full refresh re-reads
+`raw_user` (subject already gone), so erased subjects never reappear.
+
+## Status
+
+**Verified end-to-end on a live pipeline** (2026-07-27, `e2-demo-field-eng`,
+pipeline `allegiant_dsar_sdp_demo`, schema `dkushari_uc.allegiant_air_sdp_dsar`):
+modern-API pipeline full-refresh COMPLETED (linear medallion, masking + aggregate
+correct), multi-subject `02_erasure` erased all 3 PENDING requests (2× DELETE +
+1× OBFUSCATE) across raw/bronze/silver, refreshed gold, marked all COMPLETE.
 
 ## Requirements
 
-- **Serverless Lakeflow Declarative Pipelines** (or Pro/Advanced edition) — AUTO
-  CDC requires it.
-- Unity Catalog. All names are widget/config-driven; nothing is hard-coded to
-  Allegiant.
+Serverless Lakeflow Declarative Pipelines (AUTO CDC needs it). Unity Catalog. All
+names widget/config-driven.
 
-See `usage.md` for the full test runbook.
+See `usage.md` for the full runbook.

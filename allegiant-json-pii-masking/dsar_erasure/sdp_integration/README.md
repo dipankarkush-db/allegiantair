@@ -13,10 +13,51 @@ Lakeflow Declarative Pipelines Python API: `from pyspark import pipelines as dp`
 
 ## End-to-end architecture & data flow
 
-![End-to-end architecture & data flow](architecture.png)
+```mermaid
+flowchart TB
+    classDef storage fill:#b2dfdb,stroke:#00695c,stroke-width:2px,color:#000
+    classDef raw fill:#b2ebf2,stroke:#00838f,stroke-width:2px,color:#000
+    classDef bronze fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
+    classDef silver fill:#fff9c4,stroke:#f9a825,stroke-width:2px,color:#000
+    classDef gold fill:#e6a5a5,stroke:#b71c1c,stroke-width:2px,color:#000
+    classDef erasure fill:#e1bee7,stroke:#8e24aa,stroke-width:2px,color:#000
 
-<sub>Diagram source: [`architecture.mmd`](architecture.mmd) (Mermaid). Re-render with
-`mmdc -i architecture.mmd -o architecture.png -b white -s 2`.</sub>
+    UCV["<b>Unity Catalog Volume (Storage)</b>
+    /Volumes/cat/schema/raw_user/landing/*.json
+    (initial & incremental arrivals)"]:::storage
+    Raw["<b>raw_user (ingest)</b>
+    streaming table · cleartext PII"]:::raw
+    Bronze["<b>bronze_user</b>
+    mask PII · scalar + in-JSON"]:::bronze
+    Silver["<b>silver_user</b>
+    clean / validate (or SCD1)"]:::silver
+    Gold["<b>gold_user</b>
+    per-user aggregate (MV)"]:::gold
+    Erasure["<b>Erasure Job</b>
+    + reads PENDING dsar_request
+    + DELETE / OBFUSCATE across tables
+    + VACUUM (physical purge)
+    + rewrite landing FILES in place
+    + refresh gold MV
+    + validate no cleartext trace"]:::erasure
+
+    UCV -->|"Auto Loader (cloudFiles, JSON, recursive)"| Raw
+    Raw -->|"skipChangeCommits stream"| Bronze
+    Bronze -->|"skipChangeCommits stream"| Silver
+    Silver -->|"batch MV"| Gold
+
+    Bronze ~~~ Erasure
+    Erasure -.->|"downstream erase"| Raw
+    Erasure -.->|"downstream erase"| Bronze
+    Erasure -.->|"downstream erase"| Silver
+    Erasure -.->|"downstream erase"| Gold
+    Erasure -->|"integrity loop / refresh"| Gold
+    Erasure -.->|"CCPA key step: rewrite landing files"| UCV
+```
+
+<sub>Rendered inline (GitHub gives zoom/pan controls). A static copy —
+[`architecture.png`](architecture.png) — and the source [`architecture.mmd`](architecture.mmd)
+are kept in sync; re-render with `mmdc -i architecture.mmd -o architecture.png -b white -s 2`.</sub>
 
 > **Erasure removes the subject from the tables AND the source files.** `DELETE`/`VACUUM`
 > permanently purges the base tables; the landing files are rewritten in place (drop

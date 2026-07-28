@@ -1,10 +1,3 @@
----
-config:
-  flowchart:
-    htmlLabels: true
-    nodeSpacing: 60
-    rankSpacing: 70
----
 flowchart TB
     classDef storage fill:#b2dfdb,stroke:#00695c,stroke-width:2px,color:#000
     classDef raw fill:#b2ebf2,stroke:#00838f,stroke-width:2px,color:#000
@@ -13,12 +6,24 @@ flowchart TB
     classDef gold fill:#e6a5a5,stroke:#b71c1c,stroke-width:2px,color:#000
     classDef erasure fill:#e1bee7,stroke:#8e24aa,stroke-width:2px,color:#000
 
-    UCV["<b>Unity Catalog Volume (Storage)</b><br/>/Volumes/cat/schema/raw_user/landing/*.json<br/>(initial &amp; incremental arrivals)"]:::storage
-    Raw["<b>raw_user (ingest)</b><br/>streaming table &middot; cleartext PII"]:::raw
-    Bronze["<b>bronze_user</b><br/>mask PII &middot; scalar + in-JSON"]:::bronze
-    Silver["<b>silver_user</b><br/>clean / validate (or SCD1)"]:::silver
-    Gold["<b>gold_user</b><br/>per-user aggregate (MV)"]:::gold
-    Erasure["<b>Erasure Job</b><br/>+ reads PENDING dsar_request<br/>+ DELETE / OBFUSCATE across tables<br/>+ VACUUM (physical purge)<br/>+ rewrite landing FILES in place<br/>+ refresh gold MV<br/>+ validate no cleartext trace"]:::erasure
+    UCV["<b>Unity Catalog Volume (Storage)</b>
+    /Volumes/cat/schema/raw_user/landing/*.json
+    (initial & incremental arrivals)"]:::storage
+    Raw["<b>raw_user (ingest)</b>
+    streaming table · cleartext PII"]:::raw
+    Bronze["<b>bronze_user</b>
+    mask PII · scalar + in-JSON"]:::bronze
+    Silver["<b>silver_user</b>
+    clean / validate (or SCD1)"]:::silver
+    Gold["<b>gold_user</b>
+    per-user aggregate (MV)"]:::gold
+    Erasure["<b>Erasure Job</b>
+    + reads PENDING dsar_request
+    + DELETE / OBFUSCATE across tables
+    + VACUUM (physical purge)
+    + rewrite landing FILES in place
+    + refresh gold MV
+    + validate no cleartext trace"]:::erasure
 
     UCV -->|"Auto Loader (cloudFiles, JSON, recursive)"| Raw
     Raw -->|"skipChangeCommits stream"| Bronze

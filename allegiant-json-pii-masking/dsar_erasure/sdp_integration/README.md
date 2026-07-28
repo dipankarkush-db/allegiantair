@@ -149,6 +149,28 @@ Erasure removes subjects from the base tables **and the source files**, so the p
 is idempotent under any mix of incremental and full-refresh updates: a full refresh
 re-reads the (scrubbed) files, so erased subjects never reappear.
 
+## Alignment with Databricks' GDPR/CCPA guidance
+
+This solution follows Databricks' official
+[Process GDPR and CCPA deletion requests with Lakeflow Declarative Pipelines](https://docs.databricks.com/aws/en/ldp/gdpr)
+guidance, point for point:
+
+| Databricks guidance | How `02_erasure` implements it |
+|---|---|
+| Delete from the **source** Delta tables via DML | `DELETE` (or `UPDATE` for OBFUSCATE) on `raw_user` |
+| Delete from the **streaming tables** via DML | `DELETE`/`UPDATE` on `bronze_user` and `silver_user` |
+| Streaming reads must use **`skipChangeCommits`** so the delete doesn't fail the flow | Set on both streaming hops (raw→bronze, bronze→silver) — hardened from the start |
+| **Materialized views** auto-handle deletes — just **refresh** | `gold_user` is an MV; `02` refreshes it (never `DELETE`s a view) |
+| Physically remove records: **`REORG TABLE … APPLY (PURGE)`** (deletion vectors) | `purge()` runs `REORG … APPLY (PURGE)` on each modified table |
+| **`VACUUM`** to permanently remove old file versions (history retention) | `VACUUM` after `delta.deletedFileRetentionDuration='interval 0 hours'` (serverless-safe) |
+| ⚠️ *"you must also remember to delete data in **upstream sources, such as queues and cloud storage**"* | **`02` scrubs the Auto Loader landing files in the UC volume** (rewrite in place: drop for DELETE, redact for OBFUSCATE) — the doc raises this requirement but provides no mechanism; this is the file-scrub step, proven by the full-refresh acid test |
+
+> **Beyond the doc:** the guidance explicitly calls out cloud-storage/upstream deletion
+> as a requirement but leaves it to the reader. Because our source of truth is *files*
+> ingested by Auto Loader, we implement it directly — so a **full refresh cannot
+> resurrect** an erased subject (verified live). Without the file scrub, a full refresh
+> re-reads the original files and re-materializes the subject — a GDPR/CCPA violation.
+
 ## Status
 
 **Verified end-to-end live** (2026-07-28, `e2-demo-field-eng`, serverless, schema

@@ -13,43 +13,10 @@ Lakeflow Declarative Pipelines Python API: `from pyspark import pipelines as dp`
 
 ## End-to-end architecture & data flow
 
-```mermaid
-flowchart TB
-    %% Define color classes for the legend
-    classDef storage fill:#e0f2f1,stroke:#00695c,stroke-width:2px,color:#000
-    classDef raw fill:#e0f7fa,stroke:#00838f,stroke-width:2px,color:#000
-    classDef bronze fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
-    classDef silver fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:#000
-    classDef gold fill:#ffcdd2,stroke:#b71c1c,stroke-width:2px,color:#000
-    classDef erasure fill:#e1bee7,stroke:#4a148c,stroke-width:2px,color:#000
+![End-to-end architecture & data flow](architecture.png)
 
-    %% Node Definitions
-    UCV["Unity Catalog Volume (Storage)<br/>/Volumes/cat/schema/raw_user/landing/*.json<br/>(initial & incremental arrivals)"]:::storage
-
-    Raw["raw_user (ingest)<br/>streaming table<br/>cleartext PII"]:::raw
-
-    Bronze["bronze_user<br/>mask PII<br/>scalar + in-JSON"]:::bronze
-    Silver["silver_user<br/>clean / validate<br/>(or SCD1)"]:::silver
-    Gold["gold_user<br/>per-user aggregate (MV)"]:::gold
-
-    Erasure["Erasure Job<br/>+ reads PENDING dsar_request<br/>+ DELETE / OBFUSCATE across tables<br/>+ VACUUM (physical purge)<br/>+ rewrite landing FILES in place<br/>+ refresh gold MV<br/>+ validate no cleartext trace"]:::erasure
-
-    %% Data Ingestion Flow
-    UCV -->|Auto Loader <br/> cloudFiles, JSON, recursive| Raw
-
-    %% Processing Pipeline
-    Raw -->|skipChangeCommits stream| Bronze
-    Bronze -->|skipChangeCommits stream| Silver
-    Silver -->|batch MV| Gold
-
-    %% Erasure Flow & Integrity Loop
-    Erasure -.->|CCPA key step: rewrite landing files| UCV
-    Erasure -.->|downstream erase| Raw
-    Erasure -.->|downstream erase| Bronze
-    Erasure -.->|downstream erase| Silver
-    Erasure -.->|downstream erase| Gold
-    Erasure -->|integrity loop / refresh| Gold
-```
+<sub>Diagram source: [`architecture.mmd`](architecture.mmd) (Mermaid). Re-render with
+`mmdc -i architecture.mmd -o architecture.png -b white -s 2`.</sub>
 
 > **Erasure removes the subject from the tables AND the source files.** `DELETE`/`VACUUM`
 > permanently purges the base tables; the landing files are rewritten in place (drop

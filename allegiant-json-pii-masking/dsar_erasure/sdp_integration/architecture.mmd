@@ -12,7 +12,7 @@ flowchart TB
     Raw["<b>raw_user (ingest)</b>
     streaming table · cleartext PII"]:::raw
     Bronze["<b>bronze_user</b>
-    mask PII · scalar + in-JSON"]:::bronze
+    standardized events (cleartext PII)"]:::bronze
     Silver["<b>silver_user</b>
     clean / validate (or SCD1)"]:::silver
     Gold["<b>gold_user</b>

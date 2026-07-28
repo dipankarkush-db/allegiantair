@@ -182,12 +182,13 @@ current Lakeflow UI groups these as follows:
 **✅ Expected outcome:**
 - Graph shows **4 green nodes**: `raw_user → bronze_user → silver_user → gold_user`
   (`raw_user` is the Auto Loader ingest node).
-- Row counts and masking:
+- Row counts and content (**cleartext flows through — this DSAR demo does not mask at
+  ingest**; every layer holds real PII until an erasure targets a subject):
   ```sql
   SELECT count(*) FROM <cat>.<schema>.raw_user;      -- 10000 (ingested from files)
   SELECT count(*) FROM <cat>.<schema>.silver_user;   -- 10000 (append variant) / 2000 (SCD1)
   SELECT count(*) FROM <cat>.<schema>.gold_user;     -- 2000 per-customer rollups
-  SELECT user_id, email, full_name FROM <cat>.<schema>.silver_user LIMIT 3;   -- email/full_name = ***REDACTED***, user_id intact
+  SELECT user_id, email, full_name FROM <cat>.<schema>.silver_user LIMIT 3;   -- real email/full_name (cleartext) + user_id
   ```
 
 **If the graph fails:**

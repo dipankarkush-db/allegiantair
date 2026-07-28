@@ -28,7 +28,8 @@ flowchart TB
     Raw["<b>raw_user (ingest)</b>
     streaming table · cleartext PII"]:::raw
     Bronze["<b>bronze_user</b>
-    mask PII · scalar + in-JSON"]:::bronze
+    standardized events
+    (cleartext PII)"]:::bronze
     Silver["<b>silver_user</b>
     clean / validate (or SCD1)"]:::silver
     Gold["<b>gold_user</b>
@@ -90,8 +91,9 @@ only advances the offset (no data read) → negligible latency.
 
 - **`raw_user`** — Auto Loader (`cloudFiles`, JSON) ingest of the volume landing files;
   holds cleartext PII + stable non-PII `user_id`.
-- **`bronze_user`** — streaming; masks PII inline (scalar + in-JSON), preserves
-  `user_id`/`revenue`. `skipChangeCommits` on the read of `raw_user`.
+- **`bronze_user`** — streaming; standardizes events. **Cleartext PII flows through**
+  (no mask-at-ingest in this DSAR demo — every layer holds real PII until an erasure
+  targets a subject). `skipChangeCommits` on the read of `raw_user`.
 - **`silver_user`** — streaming; cleaned/validated events (or SCD1 dimension in the CDC
   variant). Reads **bronze**; `skipChangeCommits` on that read.
 - **`gold_user`** — **materialized view**; per-customer rollup over **silver**. Batch
@@ -100,9 +102,10 @@ only advances the offset (no data read) → negligible latency.
 
 ### Why `user_id` is the match key
 
-Intake gives an **email**, but bronze/silver mask it — so `02` resolves email →
-`user_id` once from the raw layer, then erases by `user_id` everywhere. `user_id` is
-non-PII and survives masking.
+Intake gives an **email**; `02` resolves email → stable **`user_id`** once (from
+`raw_user`) and erases by `user_id` at every layer. `user_id` is a non-PII business
+key, so it still identifies the subject **after** an OBFUSCATE has redacted their
+email/name — matching on email alone would fail on already-redacted rows.
 
 ## Files
 
@@ -157,10 +160,10 @@ guidance, point for point:
 
 | Databricks guidance | How `02_erasure` implements it |
 |---|---|
-| Delete from the **source** Delta tables via DML | DELETE requests → `DELETE` on `raw_user`; OBFUSCATE requests → `UPDATE` on `raw_user` (only raw still holds cleartext PII) |
-| Delete from the **streaming tables** via DML | **DELETE requests** → `DELETE` on `bronze_user` and `silver_user`. **OBFUSCATE requests skip bronze/silver** (already masked there by the bronze step) — only raw is updated |
+| Delete from the **source** Delta tables via DML | DELETE → `DELETE` on `raw_user`; OBFUSCATE → `UPDATE` (redact PII) on `raw_user` |
+| Delete from the **streaming tables** via DML | Every layer carries cleartext PII in this demo, so both modes act on **all** base tables: DELETE removes rows from `bronze_user`+`silver_user`; OBFUSCATE redacts them there too (symmetric with raw) |
 | Streaming reads must use **`skipChangeCommits`** so the delete doesn't fail the flow | Set on both streaming hops (raw→bronze, bronze→silver) — hardened from the start |
-| **Materialized views** auto-handle deletes — just **refresh** | `gold_user` is an MV; `02` **refreshes** it (never `DELETE`s a view) **when `pipeline_id` is set**; otherwise it prints the manual-refresh command and flags that gold still shows the subject until you run the pipeline |
+| **Materialized views** auto-handle deletes — just **refresh** | `gold_user` is an MV; `02` **refreshes** it (never `DELETE`s a view). It **auto-discovers** the owning pipeline from `gold_user`'s `pipelines.pipelineId` table property and triggers the refresh itself (falls back to the `pipeline_id` widget / manual command) |
 | Physically remove records: **`REORG TABLE … APPLY (PURGE)`** (deletion vectors) | `purge()` runs `REORG … APPLY (PURGE)` on each modified table |
 | **`VACUUM`** to permanently remove old file versions (history retention) | `VACUUM` after `delta.deletedFileRetentionDuration='interval 0 hours'` (serverless-safe) |
 | ⚠️ *"you must also remember to delete data in **upstream sources, such as queues and cloud storage**"* | **`02` scrubs the Auto Loader landing files in the UC volume** (rewrite in place: drop for DELETE, redact for OBFUSCATE) — the doc raises this requirement but provides no mechanism; this is the file-scrub step, proven by the full-refresh acid test |
@@ -170,6 +173,22 @@ guidance, point for point:
 > ingested by Auto Loader, we implement it directly — so a **full refresh cannot
 > resurrect** an erased subject (verified live). Without the file scrub, a full refresh
 > re-reads the original files and re-materializes the subject — a GDPR/CCPA violation.
+
+### Relationship to the *GDPR discovery & deletion using data classification* notebook
+
+Databricks also ships a
+[GDPR discovery & deletion notebook](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification)
+that **discovers** PII tables from `system.data_classification.results` (auto-classification
+tags, e.g. `class.email_address`) and runs a plain `DELETE … WHERE email = …` on each.
+That notebook is a great **discovery front-end** but targets **static Delta tables** — a
+bare `DELETE` on a *streaming* Declarative-Pipeline source **fails** (`append-only
+source`, the exact incident this solution fixes) and it does not address materialized
+views, physical purge, or source files. This solution is the **pipeline-grade** erasure
+engine; the two are complementary — you could use classification to *discover* which
+tables/columns hold PII, then feed subjects into this pipeline's `dsar_request` queue to
+*erase* them safely across a live streaming medallion. *(Note: `system.data_classification.results`
+requires the data-classification feature enabled + elevated privileges; this solution
+does not depend on it.)*
 
 ## Status
 

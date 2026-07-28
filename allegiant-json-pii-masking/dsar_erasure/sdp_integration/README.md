@@ -15,40 +15,43 @@ Lakeflow Declarative Pipelines Python API: `from pyspark import pipelines as dp`
 
 ```mermaid
 flowchart LR
-    subgraph VOL["Unity Catalog Volume — landing zone"]
-        direction TB
-        INIT["landing/initial/*.json<br/>(Part A: initial batch — written by 00)"]
-        INCR["landing/incremental/*.json<br/>(Part B: new arrivals — 00b / manual upload)"]
-    end
+    %% Define color classes for the legend
+    classDef storage fill:#e0f2f1,stroke:#00695c,stroke-width:2px,color:#000
+    classDef raw fill:#e0f7fa,stroke:#00838f,stroke-width:2px,color:#000
+    classDef bronze fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
+    classDef silver fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:#000
+    classDef gold fill:#ffcdd2,stroke:#b71c1c,stroke-width:2px,color:#000
+    classDef erasure fill:#e1bee7,stroke:#4a148c,stroke-width:2px,color:#000
 
-    RAW["raw_user (ingest)<br/>cleartext PII"]
-    BRONZE["bronze_user<br/>mask PII (scalar + in-JSON)"]
-    SILVER["silver_user<br/>clean / validate (or SCD1)"]
-    GOLD["gold_user<br/>per-user aggregate (MV)"]
-    ERASE["02_erasure job<br/>reads PENDING dsar_request → resolve email→user_id<br/>DELETE / OBFUSCATE across silver→bronze→raw (tables)<br/>VACUUM (physical purge)<br/>rewrite landing FILES in place (drop / redact)<br/>refresh gold MV<br/>validate no cleartext (tables AND files) → COMPLETE"]
+    %% Node Definitions
+    UCV["Unity Catalog Volume (Storage)<br/>/Volumes/cat/schema/raw_user/landing/*.json<br/>(initial & incremental arrivals)"]:::storage
 
-    VOL -->|"Auto Loader<br/>(cloudFiles, JSON, recursive)"| RAW
-    RAW -->|"stream · skipChangeCommits"| BRONZE
-    BRONZE -->|"stream · skipChangeCommits"| SILVER
-    SILVER -->|"batch MV"| GOLD
+    RawIngest["raw_user (ingest)"]:::raw
+    RawPII["raw_user PII<br/>cleartext"]:::raw
 
-    ERASE -.->|"erase rows"| SILVER
-    ERASE -.->|"erase rows"| BRONZE
-    ERASE -.->|"erase rows"| RAW
-    ERASE -.->|"refresh (cannot DELETE a view)"| GOLD
-    ERASE ==>|"CCPA key step:<br/>scrub SOURCE files"| VOL
+    Bronze["bronze_user<br/>mask PII<br/>scalar + in-JSON"]:::bronze
+    Silver["silver_user<br/>clean / validate<br/>(or SCD1)"]:::silver
+    Gold["gold_user<br/>per-user aggregate (MV)"]:::gold
 
-    classDef storage fill:#2196F3,color:#fff,stroke:#0D47A1
-    classDef bronze fill:#FF9800,color:#000,stroke:#E65100
-    classDef silver fill:#FFEB3B,color:#000,stroke:#F9A825
-    classDef gold fill:#A52A2A,color:#fff,stroke:#5D1A1A
-    classDef erase fill:#9C27B0,color:#fff,stroke:#4A148C
+    Erasure["Erasure Job<br/>+ reads PENDING dsar_request<br/>+ DELETE / OBFUSCATE across tables<br/>+ VACUUM (physical purge)<br/>+ rewrite landing FILES in place<br/>+ refresh gold MV<br/>+ validate no cleartext trace"]:::erasure
 
-    class VOL,INIT,INCR,RAW storage
-    class BRONZE bronze
-    class SILVER silver
-    class GOLD gold
-    class ERASE erase
+    %% Data Ingestion Flow
+    UCV -->|Auto Loader <br/> cloudFiles, JSON, recursive| RawIngest
+    UCV -->|skipChangeCommits stream| RawPII
+    RawIngest --> RawPII
+
+    %% Processing Pipeline
+    RawPII -->|skipChangeCommits stream| Bronze
+    Bronze -->|skipChangeCommits stream| Silver
+    Silver -->|batch MV| Gold
+
+    %% Erasure Flow & Integrity Loop
+    Erasure -.->|CCPA key step: rewrite landing files| UCV
+    Erasure -.->|downstream erase| RawPII
+    Erasure -.->|downstream erase| Bronze
+    Erasure -.->|downstream erase| Silver
+    Erasure -.->|downstream erase| Gold
+    Erasure -->|integrity loop / refresh| Gold
 ```
 
 > **Erasure removes the subject from the tables AND the source files.** `DELETE`/`VACUUM`

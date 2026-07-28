@@ -13,31 +13,49 @@ Lakeflow Declarative Pipelines Python API: `from pyspark import pipelines as dp`
 
 ## End-to-end architecture & data flow
 
+```mermaid
+flowchart LR
+    subgraph VOL["Unity Catalog Volume — landing zone"]
+        direction TB
+        INIT["landing/initial/*.json<br/>(Part A: initial batch — written by 00)"]
+        INCR["landing/incremental/*.json<br/>(Part B: new arrivals — 00b / manual upload)"]
+    end
+
+    RAW["raw_user (ingest)<br/>cleartext PII"]
+    BRONZE["bronze_user<br/>mask PII (scalar + in-JSON)"]
+    SILVER["silver_user<br/>clean / validate (or SCD1)"]
+    GOLD["gold_user<br/>per-user aggregate (MV)"]
+    ERASE["02_erasure job<br/>reads PENDING dsar_request → resolve email→user_id<br/>DELETE / OBFUSCATE across silver→bronze→raw (tables)<br/>VACUUM (physical purge)<br/>rewrite landing FILES in place (drop / redact)<br/>refresh gold MV<br/>validate no cleartext (tables AND files) → COMPLETE"]
+
+    VOL -->|"Auto Loader<br/>(cloudFiles, JSON, recursive)"| RAW
+    RAW -->|"stream · skipChangeCommits"| BRONZE
+    BRONZE -->|"stream · skipChangeCommits"| SILVER
+    SILVER -->|"batch MV"| GOLD
+
+    ERASE -.->|"erase rows"| SILVER
+    ERASE -.->|"erase rows"| BRONZE
+    ERASE -.->|"erase rows"| RAW
+    ERASE -.->|"refresh (cannot DELETE a view)"| GOLD
+    ERASE ==>|"CCPA key step:<br/>scrub SOURCE files"| VOL
+
+    classDef storage fill:#2196F3,color:#fff,stroke:#0D47A1
+    classDef bronze fill:#FF9800,color:#000,stroke:#E65100
+    classDef silver fill:#FFEB3B,color:#000,stroke:#F9A825
+    classDef gold fill:#A52A2A,color:#fff,stroke:#5D1A1A
+    classDef erase fill:#9C27B0,color:#fff,stroke:#4A148C
+
+    class VOL,INIT,INCR,RAW storage
+    class BRONZE bronze
+    class SILVER silver
+    class GOLD gold
+    class ERASE erase
 ```
-                                 ┌──────────────────────────────────────────────────────────────┐
-                                 │  Unity Catalog Volume  /Volumes/<cat>/<schema>/raw_user/       │
-   00  writes ─────────────────▶ │    landing/initial/*.json        (Part A: initial batch)       │
-   00b writes / you upload ────▶ │    landing/incremental/*.json    (Part B: new arrivals)        │
-                                 └───────────────────────────────┬──────────────────────────────┘
-                                                                 │  Auto Loader  (cloudFiles, JSON, recursive)
-                                                                 ▼
-   ┌───────────┐  skipChangeCommits  ┌────────────┐  skipChangeCommits ┌────────────┐  batch MV   ┌───────────┐
-   │ raw_user  │ ──── stream ──────▶ │ bronze_user│ ──── stream ──────▶ │ silver_user│ ─────────▶ │ gold_user │
-   │ (ingest)  │                     │ mask PII   │                     │ clean /    │            │ per-user  │
-   │ cleartext │                     │ scalar +   │                     │ validate   │            │ aggregate │
-   │ PII       │                     │ in-JSON    │                     │ (or SCD1)  │            │ (MV)      │
-   └───────────┘                     └────────────┘                     └────────────┘            └───────────┘
-        ▲                                                                                                │
-        │                                                                                                │
-        │            ┌──────────────────────────────  02_erasure  ──────────────────────────────┐       │
-        │            │  reads PENDING dsar_request → resolve email→user_id →                      │       │
-        └────────────┤    DELETE / OBFUSCATE across silver → bronze → raw   (tables)              │       │
-       scrub the     │    + VACUUM (physical purge)                                               │       │
-       SOURCE files  │    + rewrite the landing FILES in place (drop / redact)  ◀── CCPA key step │       │
-       so a full     │    + refresh gold MV ──────────────────────────────────────────────────────┼──────▶│
-       refresh can't │    + validate no cleartext trace (tables AND files) → mark COMPLETE        │
-       resurrect     └───────────────────────────────────────────────────────────────────────────┘
-```
+
+> **Erasure removes the subject from the tables AND the source files.** `DELETE`/`VACUUM`
+> permanently purges the base tables; the landing files are rewritten in place (drop
+> records for DELETE, redact for OBFUSCATE) so a **full refresh cannot resurrect** an
+> erased subject. Gold is a materialized view — it can't be `DELETE`d, so `02` refreshes
+> it to recompute clean from silver.
 
 **Erasure touches both the tables and the files.** Because Auto Loader ingests from
 files, erasing only the tables would leave cleartext PII in the volume — and a **full

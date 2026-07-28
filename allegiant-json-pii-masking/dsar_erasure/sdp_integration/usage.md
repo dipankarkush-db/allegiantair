@@ -34,9 +34,34 @@ each in its own schema.
 | **Schema** | `allegiant_air_sdp_dsar` | `allegiant_air_sdp_dsar_cdc` |
 | **Needed?** | Yes — main demo | Optional — the SCD1 case |
 
-> Neither is SCD type 2. Everything below works identically for either variant — just
-> point `catalog`/`schema` (and the pipeline's `dsar.schema` config) at that variant's
-> schema. To demo both, run the runbook twice against the two schemas.
+> Neither is SCD type 2. **Part A and Part B below are the exact same steps for both
+> variants** — the *only* differences are (1) which `01`/`01b` notebook you attach to the
+> pipeline and (2) the schema you point everything at. Nothing else changes.
+
+### How to follow the runbook for each variant
+
+Pick your variant, use its settings **consistently** in every notebook widget and in the
+pipeline config, then follow Part A → Part B verbatim:
+
+| Setting (used in `00`, `00b`, `02` widgets **and** pipeline config) | Variant A — append silver | Variant B — SCD1 (CDC) |
+|---|---|---|
+| Pipeline source notebook (Step A2) | `01_sdp_pipeline` | `01b_sdp_pipeline_cdc_variant` |
+| `schema` / `dsar.schema` | `allegiant_air_sdp_dsar` | `allegiant_air_sdp_dsar_cdc` |
+| `catalog` / `dsar.catalog` | your catalog | your catalog (same) |
+| `volume` / `dsar.volume` | `raw_user` | `raw_user` |
+| `silver_user` row count after A2 | ~10,000 (1 row/event) | ~2,000 (1 row/user, latest) |
+
+- **To run just one variant:** set the schema above in every notebook + the pipeline
+  config, and go through Part A then Part B once.
+- **To demo both:** run the whole runbook **twice** — once per row of the table, each in
+  its **own schema**. The two are fully independent (separate volumes-subtrees are not
+  even needed since each schema has its own volume); they never interact. Do them
+  sequentially (finish A, then B) to keep it simple.
+
+> The only step-level difference you'll observe is the **silver row count** (append keeps
+> every event; SCD1 keeps one row per customer) — the erasure, file-scrub, gold-refresh,
+> and full-refresh behavior are identical. Each per-step "Expected outcome" below notes
+> the SCD1 number where it differs.
 
 ---
 

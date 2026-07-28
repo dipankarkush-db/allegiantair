@@ -72,6 +72,7 @@ non-PII and survives masking.
 | `01_sdp_pipeline.ipynb` | Pipeline: Auto Loader raw → bronze → silver (append) → gold MV | **Attach as a Lakeflow pipeline source** |
 | `01b_sdp_pipeline_cdc_variant.ipynb` | Alt pipeline: silver as **SCD1 via AUTO CDC** (matches real Merlot) | Attach as a *separate* pipeline (own schema) |
 | `02_erasure.ipynb` | Erase every PENDING subject at every layer **+ scrub volume files** + purge + refresh gold | **Batch** — run per DSAR wave |
+| `03_validate.ipynb` | **Click-to-run** read-only validation (widget-driven; one `%sql` check per cell): landing files, medallion counts, masking, DSAR queue, no-trace | **Batch** — run any time |
 | `sample_data/incremental_batch_1/` | Pre-made incremental landing files (upload for Part B) | Upload to the volume |
 | `usage.md` | Step-by-step runbook: Part A (initial) + Part B (incremental), each step with expected outcomes | — |
 

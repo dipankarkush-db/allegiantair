@@ -88,6 +88,7 @@ sdp_integration/
   01_sdp_pipeline.ipynb                 # append-silver variant (Auto Loader)
   01b_sdp_pipeline_cdc_variant.ipynb    # SCD1-silver variant (optional)
   02_erasure.ipynb                      # erasure driver (tables + volume files)
+  03_validate.ipynb                     # click-to-run validation (widget-driven, one %sql check per cell)
   sample_data/incremental_batch_1/      # pre-made incremental files (for Part B option)
   README.md
   usage.md
@@ -97,8 +98,15 @@ sdp_integration/
   `https://github.com/dipankarkush-db/allegiantair`, branch `main`.
 - **Manual import.** Import the `.ipynb` files.
 
-**Expected outcome:** all five notebooks visible in your workspace. `00`, `00b`, `02`
-are run interactively (Run all); `01`/`01b` are attached to a pipeline (Step A2).
+**Expected outcome:** all six notebooks visible in your workspace. `00`, `00b`, `02`,
+`03` are run interactively (Run all); `01`/`01b` are attached to a pipeline (Step A2).
+
+> **Verifying results:** every `✅ Expected outcome` below can be checked at a click by
+> running **`03_validate`** (set the same `catalog`/`schema`/`volume` widgets, Run all)
+> — it renders each check as its own `%sql` result table (landing files, medallion
+> counts, masking, DSAR queue, no-cleartext-trace). Or paste the SQL into the **SQL
+> Editor**. Don't add scratch notebooks *inside* the Git folder — it dirties the repo;
+> keep ad-hoc work in your home folder.
 
 ---
 
@@ -136,29 +144,38 @@ initial batch of raw JSON files into `landing/initial/`, and seeds the 1st DSAR 
 
 **A2.1 — Open the editor.** Jobs & Pipelines → **Create → ETL pipeline**.
 
-**A2.2 — Use the EXISTING notebook, not the sample.** The editor offers a starter
-project with sample `transformations/*.py`. Choose **add existing assets** (or create
-it, then remove the sample transformation and **add existing source code**). Source
-path:
-`/Users/<you>/allegiantair/allegiant-json-pii-masking/dsar_erasure/sdp_integration/01_sdp_pipeline`
-(or `…/01b_sdp_pipeline_cdc_variant`).
+**A2.2 — Point it at the EXISTING notebook, not the sample.** The editor offers a
+starter project with sample `transformations/*.py`. Instead, in **Pipeline settings →
+Code assets** set the **Source code** to this repo's notebook (use **Configure
+paths**):
+- **Source code:** `01_sdp_pipeline` (or `01b_sdp_pipeline_cdc_variant`), i.e.
+  `/Workspace/Users/<you>/allegiantair/allegiant-json-pii-masking/dsar_erasure/sdp_integration/01_sdp_pipeline`
+- **Root folder:** the `sdp_integration` folder is fine (only the source file matters).
 
-**A2.3 — Settings (gear panel):**
+**A2.3 — Configure the settings.** Open **Pipeline settings** (gear / *Settings*). The
+current Lakeflow UI groups these as follows:
 
-| Setting | Value |
-|---|---|
-| **Serverless** | ✅ on |
-| **Default catalog** | your catalog (e.g. `dkushari_uc`) |
-| **Default schema / target** | the variant's schema |
-| **Pipeline mode** | Triggered |
+- **Compute:** **Serverless**.
+- **Pipeline mode:** Triggered.
+- **Default location for data assets** → **Edit catalog and schema**:
+  - **Default catalog** = your catalog (e.g. `dkushari_uc`)
+  - **Default schema** = the variant's schema (`allegiant_air_sdp_dsar`, or
+    `allegiant_air_sdp_dsar_cdc` for the CDC variant)
+- **Parameters** *(Beta)* → **Edit parameters** — this is where the notebook's
+  `dsar.*` keys go (the notebook's `cfg("dsar.catalog", …)` etc. read these). Add:
 
-**Advanced → Configuration** — add (this is how the notebook finds the volume):
+  | Parameter | Value |
+  |---|---|
+  | `dsar.catalog` | your catalog (e.g. `dkushari_uc`) |
+  | `dsar.schema` | the variant's schema |
+  | `dsar.volume` | `raw_user` |
 
-| Key | Value |
-|---|---|
-| `dsar.catalog` | your catalog |
-| `dsar.schema` | the variant's schema |
-| `dsar.volume` | `raw_user` |
+> **UI note:** in the current editor these live under **Parameters** (a *Beta*
+> section in **Pipeline settings**), not under a separate "Advanced → Configuration"
+> panel. If your workspace shows a **Configuration** section (or you use the **JSON**/
+> **YAML** settings tabs), put the same three `dsar.*` key/value pairs there — the
+> pipeline reads them the same way. The **JSON** tab is the quickest way to paste all
+> three at once.
 
 **A2.4 — Start.** The first run is the initial/full load.
 

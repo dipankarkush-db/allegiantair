@@ -14,7 +14,7 @@ Lakeflow Declarative Pipelines Python API: `from pyspark import pipelines as dp`
 ## End-to-end architecture & data flow
 
 ```mermaid
-flowchart LR
+flowchart TB
     %% Define color classes for the legend
     classDef storage fill:#e0f2f1,stroke:#00695c,stroke-width:2px,color:#000
     classDef raw fill:#e0f7fa,stroke:#00838f,stroke-width:2px,color:#000

@@ -157,10 +157,10 @@ guidance, point for point:
 
 | Databricks guidance | How `02_erasure` implements it |
 |---|---|
-| Delete from the **source** Delta tables via DML | `DELETE` (or `UPDATE` for OBFUSCATE) on `raw_user` |
-| Delete from the **streaming tables** via DML | `DELETE`/`UPDATE` on `bronze_user` and `silver_user` |
+| Delete from the **source** Delta tables via DML | DELETE requests → `DELETE` on `raw_user`; OBFUSCATE requests → `UPDATE` on `raw_user` (only raw still holds cleartext PII) |
+| Delete from the **streaming tables** via DML | **DELETE requests** → `DELETE` on `bronze_user` and `silver_user`. **OBFUSCATE requests skip bronze/silver** (already masked there by the bronze step) — only raw is updated |
 | Streaming reads must use **`skipChangeCommits`** so the delete doesn't fail the flow | Set on both streaming hops (raw→bronze, bronze→silver) — hardened from the start |
-| **Materialized views** auto-handle deletes — just **refresh** | `gold_user` is an MV; `02` refreshes it (never `DELETE`s a view) |
+| **Materialized views** auto-handle deletes — just **refresh** | `gold_user` is an MV; `02` **refreshes** it (never `DELETE`s a view) **when `pipeline_id` is set**; otherwise it prints the manual-refresh command and flags that gold still shows the subject until you run the pipeline |
 | Physically remove records: **`REORG TABLE … APPLY (PURGE)`** (deletion vectors) | `purge()` runs `REORG … APPLY (PURGE)` on each modified table |
 | **`VACUUM`** to permanently remove old file versions (history retention) | `VACUUM` after `delta.deletedFileRetentionDuration='interval 0 hours'` (serverless-safe) |
 | ⚠️ *"you must also remember to delete data in **upstream sources, such as queues and cloud storage**"* | **`02` scrubs the Auto Loader landing files in the UC volume** (rewrite in place: drop for DELETE, redact for OBFUSCATE) — the doc raises this requirement but provides no mechanism; this is the file-scrub step, proven by the full-refresh acid test |

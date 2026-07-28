@@ -8,7 +8,9 @@ Uses the modern API: `from pyspark import pipelines as dp`.
 
 ---
 
-## Step 1 — Import the notebooks
+## Step 1 — Get the notebooks into your Databricks workspace
+
+Bring these four notebooks (+ the two docs) into your workspace:
 
 ```
 sdp_integration/
@@ -16,19 +18,47 @@ sdp_integration/
   01_sdp_pipeline.ipynb                 # clean-silver variant
   01b_sdp_pipeline_cdc_variant.ipynb    # SCD1-silver variant (optional)
   02_erasure.ipynb
+  README.md
+  usage.md
 ```
+
+Two ways:
+
+- **Git folder (recommended).** Workspace → **Create → Git folder**, URL
+  `https://github.com/dipankarkush-db/allegiantair`, branch `main`. The notebooks
+  land at
+  `…/allegiantair/allegiant-json-pii-masking/dsar_erasure/sdp_integration/`.
+  *(If the folder already exists, just **Pull** the latest.)*
+- **Manual import.** Download the four `.ipynb` files from GitHub, then Workspace →
+  **Import** into any folder.
+
+> These are `.ipynb` notebooks — they import as normal Databricks notebooks;
+> `01`/`01b` are then *attached to a pipeline* in Step 3 (not run interactively).
 
 ---
 
 ## Step 2 — Build the landing source + DSAR queue (notebook 00)
 
+This creates the two tables the whole demo hangs off:
+
+- **`raw_user`** — the **landing table** (what Auto Loader would continuously write):
+  the *full customer population*, ~10k rows of cleartext PII (email, full_name,
+  nested `profile_json`). This is the streaming pipeline's **source**, not a
+  deletion list — everyone's data flows through it.
+- **`dsar_request`** — the **DSAR/CCPA erasure queue**: the handful of people who
+  actually filed a "delete/obfuscate my data" request. Seeded with **3 subjects**
+  (mix of DELETE / OBFUSCATE). Notebook `02` erases *only these subjects* out of
+  `raw_user` and every downstream layer; everyone else is untouched.
+
+Steps:
+
 1. Open **`00_setup_and_landing`**, set `catalog` / `schema` (defaults
    `dkushari_uc` / `allegiant_air_sdp_dsar`), `num_users`=2000, `events_per_user`=5.
-2. **Run all.** Builds `raw_user` (~10k rows) + a `dsar_request` queue seeded with
-   3 subjects (mix of DELETE / OBFUSCATE).
+2. **Run all.** Builds `raw_user` (~10k rows) + the `dsar_request` queue (3 PENDING).
 
 ✅ `SELECT * FROM <cat>.<schema>.raw_user LIMIT 5` shows cleartext PII;
-`SELECT * FROM <cat>.<schema>.dsar_request` shows 3 PENDING requests.
+`SELECT * FROM <cat>.<schema>.dsar_request` shows 3 PENDING requests (the subjects
+to erase).
 
 ---
 

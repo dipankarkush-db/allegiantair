@@ -111,7 +111,7 @@ re-reads the (scrubbed) files, so erased subjects never reappear.
 
 **Verified end-to-end live** (2026-07-28, `e2-demo-field-eng`, serverless, schema
 `dkushari_uc.allegiant_air_sdp_dsar`, volume `raw_user`):
-- `00` wrote 8 JSON files (10k records) to the volume + seeded 3 PENDING requests.
+- `00` wrote 8 JSON files (10k records) to the volume + seeded 10 PENDING requests (num_requests, configurable).
 - `01` Auto Loader pipeline COMPLETED: raw 10k → bronze/silver masked 10k → gold 2k.
 - `02` (wave 1) erased 2 DELETE + 1 OBFUSCATE across tables **and volume files**
   (files dropped to 9,990; OBFUSCATE kept as redacted); marked COMPLETE.

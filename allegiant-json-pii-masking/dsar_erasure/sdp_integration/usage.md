@@ -111,18 +111,19 @@ initial batch of raw JSON files into `landing/initial/`, and seeds the 1st DSAR 
 
 1. Open **`00_setup_and_landing`**. Set `catalog`/`schema` (defaults `dkushari_uc` /
    `allegiant_air_sdp_dsar`; CDC variant → `allegiant_air_sdp_dsar_cdc`), `volume`
-   (`raw_user`), `num_users`=2000, `events_per_user`=5, `num_files`=8.
+   (`raw_user`), `num_users`=2000, `events_per_user`=5, `num_files`=8,
+   `num_requests`=10 (DSAR requests to seed — matches the base layer's ~10/month).
 2. **Run all.**
 
 **✅ Expected outcome:**
 - The volume exists: `/Volumes/<cat>/<schema>/raw_user/landing/initial/` contains
   **8 JSON part-files** (~10,000 records).
-- `dsar_request` has **3 PENDING** rows (REQ-001 DELETE, REQ-002 OBFUSCATE, REQ-003
-  DELETE).
+- `dsar_request` has **`num_requests` PENDING** rows (default **10**), alternating
+  DELETE / OBFUSCATE (REQ-001 DELETE, REQ-002 OBFUSCATE, …).
 - Sanity check:
   ```sql
   SELECT count(*) FROM read_files('/Volumes/<cat>/<schema>/raw_user/landing/initial', format=>'json');  -- 10000
-  SELECT * FROM <cat>.<schema>.dsar_request;                                                             -- 3 PENDING
+  SELECT * FROM <cat>.<schema>.dsar_request;                                                             -- 10 PENDING (default)
   ```
 
 ## Step A2 — Create & build the pipeline (notebook 01 or 01b)
@@ -186,13 +187,13 @@ path:
    pipeline id.
 2. **Run all.**
 
-**✅ Expected outcome:** sections 1–3 list the 3 PENDING requests, resolve each email
+**✅ Expected outcome:** sections 1–3 list all PENDING requests (10 by default), resolve each email
 → `user_id`, and pre-count matches at every layer; section 4 prints the SQL it *would*
 run; section 5b lists the landing files it *would* scrub. **Nothing is modified.**
 
 ## Step A4 — First erasure, live (notebook 02)
 
-**What this step does:** erases the 3 subjects across all layers **and** the source
+**What this step does:** erases all wave-1 subjects (10 by default) across all layers **and** the source
 files, then refreshes gold.
 
 1. Set `dry_run` = **`false`**. **Run all.**
@@ -205,7 +206,7 @@ files, then refreshes gold.
 - **§6** — gold MV refresh triggered (async).
 - **§7** — prints `PASS — DELETE subjects erased with no trace; OBFUSCATE subjects
   redacted in place.`, verifies **no cleartext survives in the volume files**, and
-  flips all 3 requests to **COMPLETE**.
+  flips all wave-1 requests to **COMPLETE**.
 
 Confirm:
 ```sql

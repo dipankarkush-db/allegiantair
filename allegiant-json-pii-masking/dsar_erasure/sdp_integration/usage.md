@@ -1,234 +1,302 @@
-# Test runbook — DSAR erasure × Lakeflow Declarative Pipelines
+# Test runbook — DSAR erasure × Lakeflow Declarative Pipelines (Auto Loader)
 
-Deploy the pipeline, run it end-to-end (bronze → silver → gold), then process a
-DSAR erasure queue that deletes/masks every named subject at every layer — with
-zero pipeline downtime. Serverless UC workspace assumed. ~20–30 min.
+Ingest raw JSON files from a **Unity Catalog volume** with **Auto Loader** into a
+streaming medallion pipeline (raw → bronze → silver → gold), then process a DSAR
+erasure queue that deletes/masks every named subject **at every layer AND in the
+source files** — with zero pipeline downtime, and in a way that **survives a full
+refresh**.
 
-Uses the modern API: `from pyspark import pipelines as dp`.
+Modern API: `from pyspark import pipelines as dp`. Serverless UC workspace assumed.
+
+Two cycles, run in order:
+
+- **Part A — Initial cycle:** generate landing files → pipeline initial load → first
+  erasure wave.
+- **Part B — Incremental cycle:** drop new files → pipeline **incremental** run →
+  second erasure wave (mix of brand-new and older subjects).
+
+> **Why the source files matter (CCPA).** Auto Loader ingests *files*. Erasing the
+> tables alone leaves cleartext PII in those files, and a **full refresh re-reads
+> them** — resurrecting the subject. So `02` scrubs the volume files too. This is
+> verified below (Step A6).
+
+---
+
+## The two pipeline variants (choose one, or run both)
+
+`01` and `01b` are **independent variants of the same pipeline** — run separately,
+each in its own schema.
+
+| | `01_sdp_pipeline` | `01b_sdp_pipeline_cdc_variant` |
+|---|---|---|
+| **Silver** | **Append event log** — every event kept (1 row/event). **Not SCD.** | **SCD type 1** — one row per `user_id`, latest wins (AUTO CDC). |
+| **Mirrors** | Simplest medallion | Allegiant's real Merlot `dbo_user_silver_cdc` |
+| **Schema** | `allegiant_air_sdp_dsar` | `allegiant_air_sdp_dsar_cdc` |
+| **Needed?** | Yes — main demo | Optional — the SCD1 case |
+
+> Neither is SCD type 2. Everything below works identically for either variant — just
+> point `catalog`/`schema` (and the pipeline's `dsar.schema` config) at that variant's
+> schema. To demo both, run the runbook twice against the two schemas.
+
+---
+
+## Volume & landing layout
+
+```
+/Volumes/<catalog>/<schema>/raw_user/               ← UC volume (landing zone)
+    landing/
+        initial/      *.json    ← written by 00        (Part A)
+        incremental/  *.json    ← written by 00b / uploaded manually (Part B)
+```
+
+The pipeline's Auto Loader reads the whole `landing/` folder recursively, so files in
+either subfolder are ingested.
 
 ---
 
 ## Step 1 — Get the notebooks into your Databricks workspace
 
-Bring these four notebooks (+ the two docs) into your workspace:
-
 ```
 sdp_integration/
-  00_setup_and_landing.ipynb
-  01_sdp_pipeline.ipynb                 # clean-silver variant
+  00_setup_and_landing.ipynb            # initial: schema + volume + landing files + 1st DSAR wave
+  00b_incremental_landing.ipynb         # incremental: new files + 2nd DSAR wave (Part B)
+  01_sdp_pipeline.ipynb                 # append-silver variant (Auto Loader)
   01b_sdp_pipeline_cdc_variant.ipynb    # SCD1-silver variant (optional)
-  02_erasure.ipynb
+  02_erasure.ipynb                      # erasure driver (tables + volume files)
+  sample_data/incremental_batch_1/      # pre-made incremental files (for Part B option)
   README.md
   usage.md
 ```
 
-Two ways:
-
 - **Git folder (recommended).** Workspace → **Create → Git folder**, URL
-  `https://github.com/dipankarkush-db/allegiantair`, branch `main`. The notebooks
-  land at
-  `…/allegiantair/allegiant-json-pii-masking/dsar_erasure/sdp_integration/`.
-  *(If the folder already exists, just **Pull** the latest.)*
-- **Manual import.** Download the four `.ipynb` files from GitHub, then Workspace →
-  **Import** into any folder.
+  `https://github.com/dipankarkush-db/allegiantair`, branch `main`.
+- **Manual import.** Import the `.ipynb` files.
 
-> These are `.ipynb` notebooks — they import as normal Databricks notebooks;
-> `01`/`01b` are then *attached to a pipeline* in Step 3 (not run interactively).
+**Expected outcome:** all five notebooks visible in your workspace. `00`, `00b`, `02`
+are run interactively (Run all); `01`/`01b` are attached to a pipeline (Step A2).
 
 ---
 
-## Step 2 — Build the landing source + DSAR queue (notebook 00)
+# Part A — Initial cycle
 
-This creates the two tables the whole demo hangs off:
+## Step A1 — Build the schema, volume & initial landing files (notebook 00)
 
-- **`raw_user`** — the **landing table** (what Auto Loader would continuously write):
-  the *full customer population*, ~10k rows of cleartext PII (email, full_name,
-  nested `profile_json`). This is the streaming pipeline's **source**, not a
-  deletion list — everyone's data flows through it.
-- **`dsar_request`** — the **DSAR/CCPA erasure queue**: the handful of people who
-  actually filed a "delete/obfuscate my data" request. Seeded with **3 subjects**
-  (mix of DELETE / OBFUSCATE). Notebook `02` erases *only these subjects* out of
-  `raw_user` and every downstream layer; everyone else is untouched.
+**What this step does:** creates the isolated schema, the landing volume, writes the
+initial batch of raw JSON files into `landing/initial/`, and seeds the 1st DSAR queue.
 
-Steps:
+1. Open **`00_setup_and_landing`**. Set `catalog`/`schema` (defaults `dkushari_uc` /
+   `allegiant_air_sdp_dsar`; CDC variant → `allegiant_air_sdp_dsar_cdc`), `volume`
+   (`raw_user`), `num_users`=2000, `events_per_user`=5, `num_files`=8.
+2. **Run all.**
 
-1. Open **`00_setup_and_landing`**, set `catalog` / `schema` (defaults
-   `dkushari_uc` / `allegiant_air_sdp_dsar`), `num_users`=2000, `events_per_user`=5.
-2. **Run all.** Builds `raw_user` (~10k rows) + the `dsar_request` queue (3 PENDING).
+**✅ Expected outcome:**
+- The volume exists: `/Volumes/<cat>/<schema>/raw_user/landing/initial/` contains
+  **8 JSON part-files** (~10,000 records).
+- `dsar_request` has **3 PENDING** rows (REQ-001 DELETE, REQ-002 OBFUSCATE, REQ-003
+  DELETE).
+- Sanity check:
+  ```sql
+  SELECT count(*) FROM read_files('/Volumes/<cat>/<schema>/raw_user/landing/initial', format=>'json');  -- 10000
+  SELECT * FROM <cat>.<schema>.dsar_request;                                                             -- 3 PENDING
+  ```
 
-✅ `SELECT * FROM <cat>.<schema>.raw_user LIMIT 5` shows cleartext PII;
-`SELECT * FROM <cat>.<schema>.dsar_request` shows 3 PENDING requests (the subjects
-to erase).
+## Step A2 — Create & build the pipeline (notebook 01 or 01b)
 
----
+**What this step does:** stands up the Auto Loader medallion pipeline and runs the
+**initial load**, ingesting the files from Step A1.
 
-## Step 3 — Create the Declarative Pipeline (notebook 01)
+> `01`/`01b` are **pipeline source code** — do NOT "Run all" interactively (the
+> `@dp.table` decorators only execute inside a pipeline).
 
-> `01_sdp_pipeline` is **pipeline source code** — you do NOT "Run all" it like a
-> normal notebook. You attach it to a Lakeflow pipeline and Databricks executes it
-> as the DAG. Running it interactively will error on the `@dp.table` decorators.
+**A2.1 — Open the editor.** Jobs & Pipelines → **Create → ETL pipeline**.
 
-### 3.1 Open the create-pipeline flow
+**A2.2 — Use the EXISTING notebook, not the sample.** The editor offers a starter
+project with sample `transformations/*.py`. Choose **add existing assets** (or create
+it, then remove the sample transformation and **add existing source code**). Source
+path:
+`/Users/<you>/allegiantair/allegiant-json-pii-masking/dsar_erasure/sdp_integration/01_sdp_pipeline`
+(or `…/01b_sdp_pipeline_cdc_variant`).
 
-**Jobs & Pipelines → Create → ETL pipeline** (a.k.a. Declarative / Lakeflow
-pipeline). This opens the **Lakeflow pipeline editor**.
-
-### 3.2 Point it at the EXISTING notebook (don't use the generated sample)
-
-The editor offers to scaffold a **starter project** (a new folder with sample
-`transformations/*.py` / `explorations/` files). **Do not build the demo from those
-sample files** — you want *this* repo's notebook.
-
-- If asked "Start with sample code / Add existing assets" → choose **add existing
-  assets** (or create the project, then in the editor's file tree **remove the
-  sample transformation** and **add existing source code**).
-- **Add source code path:**
-  `/Users/<you>/allegiantair/allegiant-json-pii-masking/dsar_erasure/sdp_integration/01_sdp_pipeline`
-  (the notebook in your workspace Git folder).
-- The pipeline's **root/source folder** can stay at its default; only the source
-  file above matters. The graph is defined entirely by `01_sdp_pipeline`.
-
-### 3.3 Settings (right-hand **Settings** / gear panel)
+**A2.3 — Settings (gear panel):**
 
 | Setting | Value |
 |---|---|
 | **Serverless** | ✅ on |
 | **Default catalog** | your catalog (e.g. `dkushari_uc`) |
-| **Default schema / target** | `allegiant_air_sdp_dsar` (same schema `00` created) |
-| **Pipeline mode** | Triggered (fine for the demo) |
+| **Default schema / target** | the variant's schema |
+| **Pipeline mode** | Triggered |
 
-Then open **Advanced → Configuration** and add two key/value pairs (this is how the
-notebook's `cfg("dsar.catalog", …)` / `cfg("dsar.schema", …)` resolve — they must
-point at the schema holding `raw_user`):
+**Advanced → Configuration** — add (this is how the notebook finds the volume):
 
 | Key | Value |
 |---|---|
-| `dsar.catalog` | your catalog (e.g. `dkushari_uc`) |
-| `dsar.schema` | `allegiant_air_sdp_dsar` |
+| `dsar.catalog` | your catalog |
+| `dsar.schema` | the variant's schema |
+| `dsar.volume` | `raw_user` |
 
-> Default catalog/schema and the `dsar.*` config should all point to the **same**
-> catalog + `allegiant_air_sdp_dsar` schema, so the pipeline reads `raw_user` and
-> publishes `bronze/silver/gold_user` right next to it.
+**A2.4 — Start.** The first run is the initial/full load.
 
-### 3.4 Run it
+**✅ Expected outcome:**
+- Graph shows **4 green nodes**: `raw_user → bronze_user → silver_user → gold_user`
+  (`raw_user` is the Auto Loader ingest node).
+- Row counts and masking:
+  ```sql
+  SELECT count(*) FROM <cat>.<schema>.raw_user;      -- 10000 (ingested from files)
+  SELECT count(*) FROM <cat>.<schema>.silver_user;   -- 10000 (append variant) / 2000 (SCD1)
+  SELECT count(*) FROM <cat>.<schema>.gold_user;     -- 2000 per-customer rollups
+  SELECT user_id, email, full_name FROM <cat>.<schema>.silver_user LIMIT 3;   -- email/full_name = ***REDACTED***, user_id intact
+  ```
 
-Click **Start** (top of the editor). First run does an initial load of all three
-datasets.
+**If the graph fails:**
+- `dp` import / "Run all" error → you ran it interactively; attach to a pipeline.
+- `path does not exist` / empty `raw_user` → `dsar.*` config doesn't match where `00`
+  wrote the volume, or `00` wasn't run. Fix config, re-run `00`.
 
-✅ The graph shows a clean linear medallion `bronze_user → silver_user → gold_user`,
-all green. Verify the output:
+## Step A3 — First erasure, dry-run (notebook 02)
 
-```sql
-SELECT user_id, email, full_name, revenue FROM <cat>.<schema>.silver_user LIMIT 5;  -- PII redacted, user_id/revenue intact
-SELECT user_id, lifetime_revenue, event_count FROM <cat>.<schema>.gold_user LIMIT 5;  -- per-customer rollup
-```
+**What this step does:** previews exactly what would be erased — no changes.
 
-**If the graph doesn't come up:**
-- `dp` import error / "Run all" fails → you ran the notebook interactively; attach it
-  to a pipeline instead.
-- `TABLE_OR_VIEW_NOT_FOUND: …raw_user` → the `dsar.catalog`/`dsar.schema` config
-  doesn't match where `00` wrote `raw_user`, or `00` wasn't run. Fix the config and
-  re-run `00` if needed.
-- Empty/half graph → confirm the source file is `01_sdp_pipeline` and the sample
-  transformation was removed.
-
-### (Optional) CDC variant
-
-To demo the SCD1 silver that matches Allegiant's real `dbo_user_silver_cdc`:
-create a **second** pipeline pointing at `01b_sdp_pipeline_cdc_variant`, with
-`dsar.schema` = `allegiant_air_sdp_dsar_cdc` (its own schema). Re-run `00` against
-that schema first. Everything else is identical.
-
----
-
-## Step 3b — Running the pipeline: incremental vs full refresh
-
-- **Incremental** (normal run): processes only new/changed commits. UI **Start**,
-  or `databricks pipelines start-update <id>`.
-- **Full refresh** (reset & rebuild): resets all tables, re-reads `raw_user` from
-  scratch. UI **Start ▾ → Full refresh all**, or
-  `databricks pipelines start-update <id> --full-refresh`.
-- Wait for completion: `databricks pipelines get-update <id> <update-id>` →
-  `COMPLETED`.
-
-> On a billion-row source prefer **incremental** for routine erasures (the erased
-> subject is already gone from the base tables). Reserve full refresh for forcing
-> the gold MV to recompute or a clean rebuild.
-
----
-
-## Step 4 — Dry-run the erasure (notebook 02)
-
-1. Open **`02_erasure`**. Set `catalog` / `schema` to match; `dry_run` = **`true`**;
-   `do_purge` = `true`; `pipeline_id` = your pipeline id (for the gold refresh).
+1. Open **`02_erasure`**. Set `catalog`/`schema`/`volume` to match; `dry_run` =
+   **`true`**; `do_purge` = `true`; `scrub_files` = `true`; `pipeline_id` = your
+   pipeline id.
 2. **Run all.**
 
-✅ Sections 1–3 list PENDING requests, resolve each email → `user_id`, and pre-count
-matches at every layer. Section 4 prints the exact SQL it *would* run. No changes.
+**✅ Expected outcome:** sections 1–3 list the 3 PENDING requests, resolve each email
+→ `user_id`, and pre-count matches at every layer; section 4 prints the SQL it *would*
+run; section 5b lists the landing files it *would* scrub. **Nothing is modified.**
 
----
+## Step A4 — First erasure, live (notebook 02)
 
-## Step 5 — Run the live erasure
+**What this step does:** erases the 3 subjects across all layers **and** the source
+files, then refreshes gold.
 
 1. Set `dry_run` = **`false`**. **Run all.**
-2. What happens:
-   - **Section 4** — per subject, DELETE or OBFUSCATE across `silver → bronze → raw`.
-   - **Section 5** — VACUUM the modified base tables (serverless zero-retention).
-   - **Section 6** — triggers a gold MV refresh (via `pipeline_id`) so gold
-     re-derives from the erased silver.
-   - **Section 7** — validates no cleartext trace, asserts DELETE subjects gone from
-     every base table, marks requests **COMPLETE**.
 
-✅ `PASS — all requested subjects erased from base tables with no cleartext trace.`
-and `dsar_request` all `COMPLETE`.
+**✅ Expected outcome (per section):**
+- **§4** — DELETE removes rows / OBFUSCATE redacts, across `silver → bronze → raw`.
+- **§5** — VACUUM on the modified tables (zero-retention).
+- **§5b** — landing files rewritten in place: DELETE subjects' records dropped,
+  OBFUSCATE subjects' records redacted (`console shows "rewritten: N file(s)"`).
+- **§6** — gold MV refresh triggered (async).
+- **§7** — prints `PASS — DELETE subjects erased with no trace; OBFUSCATE subjects
+  redacted in place.`, verifies **no cleartext survives in the volume files**, and
+  flips all 3 requests to **COMPLETE**.
 
-> **Gold is validated on the base tables, then refreshed.** Section 7's PASS asserts
-> the erasure on `raw/bronze/silver` (the source of truth). The section-6 gold MV
-> refresh is **asynchronous** — `start_update` returns immediately — so at the instant
-> section 7 prints, `gold_user` may still show the erased subject's aggregate row
-> (section 7 prints it with a `<- refresh gold MV` note). That's expected: **wait for
-> the pipeline update triggered in section 6 to reach `COMPLETED`**, then re-query
-> `gold_user` — the DELETE subject's row is gone. Gold is derived from silver, so once
-> silver is clean and gold recomputes, gold is clean.
+Confirm:
+```sql
+-- DELETE subjects gone from tables AND files
+SELECT count(*) FROM <cat>.<schema>.raw_user WHERE user_id IN ('<deleted ids>');   -- 0
+SELECT count(*) FROM read_files('/Volumes/<cat>/<schema>/raw_user/landing', format=>'json', recursiveFileLookup=>'true')
+  WHERE user_id IN ('<deleted ids>');                                              -- 0
+```
 
-> If you didn't set `pipeline_id`, refresh gold manually: UI **Start**, or
-> `databricks pipelines start-update <id> --full-refresh`.
+> **Gold timing:** §6's refresh is async, so §7 may print gold's stale row with a
+> `<- refresh gold MV` note. Wait for the pipeline update from §6 to reach
+> `COMPLETED`, then re-query `gold_user` — the DELETE subject's row is gone.
+
+## Step A5 — Prove the pipeline never failed
+
+Open the pipeline — the update after the erasure is **healthy**, no `append-only
+source` / `FAILED fatally` error.
+
+**✅ Expected outcome:** latest update `COMPLETED`; no error events. (This was
+impossible before `skipChangeCommits`.)
+
+## Step A6 — Prove erasure survives a FULL REFRESH (the CCPA acid test)
+
+**What this step does:** re-reads every landing file from scratch and confirms the
+deleted subjects do **not** come back — because the files were scrubbed.
+
+1. Full-refresh the pipeline: UI **Start ▾ → Full refresh all**, or
+   `databricks pipelines start-update <id> --full-refresh`. Wait for `COMPLETED`.
+
+**✅ Expected outcome:**
+```sql
+SELECT count(*) FROM <cat>.<schema>.raw_user WHERE user_id IN ('<deleted ids>');  -- 0 (stayed gone!)
+SELECT count(*) FROM <cat>.<schema>.raw_user;                                     -- 9990 (10000 - 2 DELETE subjects x5)
+```
+The OBFUSCATE subject's rows are still present but ingest as `***REDACTED***` (the
+file was redacted). *This is the whole point of scrubbing the source files.*
 
 ---
 
-## Step 6 — Prove the pipeline never failed
+# Part B — Incremental cycle
 
-Open the pipeline — the latest update is **healthy**, no `append-only source` /
-`FAILED fatally` error. That behavior was impossible before `skipChangeCommits`.
+New files keep arriving, the pipeline processes them **incrementally**, and new
+erasure requests (some new subjects, some old) are handled live.
+
+## Step B1 — Land new files + enqueue the 2nd wave (notebook 00b)
+
+**What this step does:** drops a new batch of files into `landing/incremental/` and
+enqueues 4 new DSAR requests mixing new & old subjects.
+
+1. Open **`00b_incremental_landing`**. Set `catalog`/`schema`/`volume` = the same as
+   Part A. **Run all.**
+   *(Alternatively, upload the committed `sample_data/incremental_batch_1/*.json` to
+   `landing/incremental/` by hand — see that folder's README — and only run 00b's
+   wave-2 cell.)*
+
+**✅ Expected outcome:**
+- `landing/incremental/` gains a file with **24 records** (8 new customers
+  `U900001`–`U900008`).
+- `dsar_request` gains **4 new PENDING** rows: 2 target NEW subjects
+  (`U9000xx`), 2 target OLD pre-existing subjects. Verify:
+  ```sql
+  SELECT count(*) FROM read_files('/Volumes/<cat>/<schema>/raw_user/landing/incremental', format=>'json');  -- 24
+  SELECT request_id, subject_email, request_type, status FROM <cat>.<schema>.dsar_request ORDER BY request_id;
+  ```
+
+## Step B2 — Run the pipeline INCREMENTALLY
+
+**What this step does:** ingests only the new files (no full refresh).
+
+- UI: open the pipeline → **Start** (normal triggered run), or
+  `databricks pipelines start-update <id>` (no `--full-refresh`).
+
+**✅ Expected outcome:** only the new records are ingested; graph stays green.
+```sql
+SELECT count(*) FROM <cat>.<schema>.raw_user;                          -- grew by 24
+SELECT count(*) FROM <cat>.<schema>.raw_user  WHERE user_id >= 'U900000';  -- 24
+SELECT count(*) FROM <cat>.<schema>.gold_user WHERE user_id >= 'U900000';  -- 8 new customers
+```
+
+> **Incremental vs full refresh:** incremental (normal Start) processes only new
+> commits — the steady-state path. Full refresh (Start ▾ → *Full refresh all*) resets
+> and re-reads all files; because erased subjects were scrubbed from the files, a full
+> refresh never resurrects them (Step A6).
+
+## Step B3 — Second erasure wave (notebook 02, again)
+
+**What this step does:** same driver, now processing the 2nd wave (new + old
+subjects).
+
+1. Run **`02_erasure`** exactly as A3/A4 (dry-run then live) — nothing to change.
+
+**✅ Expected outcome:** both new and old subjects erased across every layer (DELETE
+removes rows, OBFUSCATE redacts), the volume files scrubbed, gold refreshed, and
+`REQ-004…007` flipped to **COMPLETE** — **while the pipeline keeps running**.
+
+> **Repeat the loop:** re-run `00b` (new files + new wave) → incremental pipeline run
+> → `02`, as many times as you like. `00b` continues the `U9000xx` / `REQ-xxx`
+> numbering.
 
 ---
 
-## Step 7 — Idempotency (full refresh + repeated incrementals)
+## Idempotency check (any point after an erasure)
 
-After the erasure, run: **incremental → full refresh → incremental**, checking
-counts each time. **Use only the DELETE-requested user_ids here** (the default queue
-= REQ-001 DELETE, REQ-002 **OBFUSCATE**, REQ-003 DELETE):
+For **DELETE** subjects, run **incremental → full refresh → incremental** and check
+counts each time (DELETE user_ids only — OBFUSCATE keeps its rows):
 
 ```sql
--- <deleted ids> = the user_ids of the DELETE requests ONLY (not the OBFUSCATE one)
-SELECT 'raw' l,count(*) c, sum(case when user_id IN (<deleted ids>) then 1 else 0 end) subj FROM <cat>.<schema>.raw_user
-UNION ALL SELECT 'bronze',count(*), sum(...) FROM <cat>.<schema>.bronze_user
+SELECT 'raw' l,count(*) c, sum(case when user_id IN ('<deleted ids>') then 1 else 0 end) subj FROM <cat>.<schema>.raw_user
 UNION ALL SELECT 'silver',count(*), sum(...) FROM <cat>.<schema>.silver_user
 UNION ALL SELECT 'gold',  count(*), sum(...) FROM <cat>.<schema>.gold_user;
 ```
 
-✅ For **DELETE** subjects: `subj = 0` on every layer, counts identical across all
-updates. A full refresh re-reads `raw_user` (subject already gone), so deleted
-subjects never return.
+**✅ Expected outcome:** `subj = 0` on every layer, stable across all updates.
 
-> **Expected — OBFUSCATE keeps its rows.** An OBFUSCATE subject (REQ-002) is *not*
-> removed — its rows stay at every layer with PII **redacted** in place. So its row
-> count stays non-zero (e.g. 5 in the clean-silver variant); that's correct, not a
-> failure. To verify OBFUSCATE, check the *content* is masked rather than the count:
-> ```sql
-> SELECT user_id, email, full_name FROM <cat>.<schema>.raw_user WHERE user_id = '<obfuscated id>';
-> -- email/full_name = ***REDACTED***, row still present
-> ```
+> OBFUSCATE keeps its rows (PII redacted in place) — verify by content, not count:
+> `SELECT email FROM <cat>.<schema>.raw_user WHERE user_id='<obf id>';  -- ***REDACTED***`
 
 ---
 
@@ -236,18 +304,20 @@ subjects never return.
 
 | Question | Answer |
 |----------|--------|
+| Ingest via Auto Loader from files? | Yes — `raw_user` is a `cloudFiles` streaming table over a UC volume |
 | Delete PII from all layers incl. bronze? | Yes — DELETE/OBFUSCATE at raw+bronze+silver + VACUUM, gold MV refreshed |
-| Without breaking the append-only stream? | Yes — `skipChangeCommits` on the two streaming hops |
-| Multiple subjects at once? | Yes — `02` processes the whole PENDING `dsar_request` queue |
-| Does it add latency? | Negligible — skipping a commit just advances the offset |
-| Future erasures need a pipeline stop? | No — once `skipChangeCommits` is set, erasures run live |
+| Delete PII from the **source files**? | Yes — `02` rewrites the landing files in place (§5b) |
+| Survives a full refresh? | Yes — files are scrubbed, so re-ingest can't resurrect a subject (Step A6) |
+| Without breaking the append-only stream? | Yes — `skipChangeCommits` on the streaming hops |
+| Works on continuously-arriving (incremental) data? | Yes — Part B: new files stream in, erasures for new + old subjects run live |
+| Future erasures need a pipeline stop? | No — erasures run live |
 
 ---
 
 ## Cleanup
 
 ```sql
-DROP SCHEMA IF EXISTS <catalog>.<schema> CASCADE;
+DROP SCHEMA IF EXISTS <catalog>.<schema> CASCADE;   -- drops tables; volume too unless referenced elsewhere
 ```
-
-Then delete the pipeline(s) from Jobs & Pipelines.
+Then delete the pipeline(s) from Jobs & Pipelines. (To keep the volume, drop only the
+tables and clear `landing/`.)

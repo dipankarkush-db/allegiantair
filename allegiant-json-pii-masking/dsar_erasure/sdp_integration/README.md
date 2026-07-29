@@ -194,15 +194,22 @@ does not depend on it.)*
 
 **Verified end-to-end live** (2026-07-28, `e2-demo-field-eng`, serverless, schema
 `dkushari_uc.allegiant_air_sdp_dsar`, volume `raw_user`):
-- `00` wrote 8 JSON files (10k records) to the volume + seeded 10 PENDING requests (num_requests, configurable).
-- `01` Auto Loader pipeline COMPLETED: raw 10k → bronze/silver masked 10k → gold 2k.
-- `02` (wave 1) erased 2 DELETE + 1 OBFUSCATE across tables **and volume files**
-  (files dropped to 9,990; OBFUSCATE kept as redacted); marked COMPLETE.
-- **Full refresh after erasure: deleted subjects did NOT return** (raw stayed 9,990) —
+- `00` wrote 8 JSON files (10k records) to the volume + seeded **10 PENDING requests**
+  (`num_requests`, configurable; alternating DELETE/OBFUSCATE, REQ-001…010).
+- `01` Auto Loader pipeline COMPLETED: **cleartext** flows raw → bronze → silver (10k) →
+  gold (2k) — no mask-at-ingest in this model.
+- `02` (wave 1) processed all 10 requests: **5 DELETE** removed from every layer **and
+  the volume files** (raw 10k → 9,975), **5 OBFUSCATE** redacted at every layer + files
+  (rows kept as `***REDACTED***`); physical purge ran (`REORG` + `VACUUM`); **gold
+  auto-refreshed** (2000 → 1,995 via the discovered `pipelines.pipelineId`); all COMPLETE.
+- **Full refresh after erasure: deleted subjects did NOT return** (raw stayed 9,975) —
   the CCPA acid test for file-level erasure.
-- Part B: `00b` landed 24 new records + a mixed wave-2 (2 new + 2 old); **incremental**
-  pipeline run ingested only the new 24; `02` (wave 2) erased new + old subjects across
-  tables and files; all 7 requests COMPLETE.
+- Part B: `00b` landed 24 new records (`U9000xx`) + a mixed wave-2 (2 new + 2 old,
+  REQ-011…014); **incremental** pipeline run ingested only the new 24; `02` (wave 2)
+  erased new + old subjects across tables and files; all requests COMPLETE.
+- Purge verified on the pipeline-managed tables: retention set in the pipeline
+  (`table_properties`), `REORG APPLY(PURGE)` + `VACUUM RETAIN 0 HOURS` from `02` (history
+  shows `REORG`/`VACUUM START`/`VACUUM END`; no `INVALID_TARGET` error).
 
 ## Requirements
 

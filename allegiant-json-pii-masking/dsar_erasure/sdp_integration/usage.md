@@ -283,7 +283,8 @@ enqueues 4 new DSAR requests mixing new & old subjects.
 **✅ Expected outcome:**
 - `landing/incremental/` gains a file with **24 records** (8 new customers
   `U900001`–`U900008`).
-- `dsar_request` gains **4 new PENDING** rows: 2 target NEW subjects
+- `dsar_request` gains **4 new PENDING** rows, numbered right after wave 1 (so with the
+  default 10-request wave 1 they are **`REQ-011`…`REQ-014`**): 2 target NEW subjects
   (`U9000xx`), 2 target OLD pre-existing subjects. Verify:
   ```sql
   SELECT count(*) FROM read_files('/Volumes/<cat>/<schema>/raw_user/landing/incremental', format=>'json');  -- 24
@@ -318,7 +319,8 @@ subjects).
 
 **✅ Expected outcome:** both new and old subjects erased across every layer (DELETE
 removes rows, OBFUSCATE redacts), the volume files scrubbed, gold refreshed, and
-`REQ-004…007` flipped to **COMPLETE** — **while the pipeline keeps running**.
+the wave-2 requests (`REQ-011`…`REQ-014` with the default 10-request wave 1) flipped to
+**COMPLETE** — **while the pipeline keeps running**.
 
 > **Repeat the loop:** re-run `00b` (new files + new wave) → incremental pipeline run
 > → `02`, as many times as you like. `00b` continues the `U9000xx` / `REQ-xxx`
